@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Poetry
+poetry.lock
+
+# IDE / Editor
+.vscode/
+.idea/
+*.code-workspace
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+*.secret.*
+*.key
+
+# 기타 빌드 산출물
+dist/
+build/
+*.egg-info/

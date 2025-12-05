@@ -1,0 +1,43 @@
+[tool.poetry]
+name = "ermct-backend"
+version = "0.1.0"
+description = "FastAPI backend for emergency medical info app"
+authors = ["Jaeuk Han <jaeuk0228@gmail.com>"]
+readme = "README.md"
+packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+fastapi = "^0.110.0"
+uvicorn = { extras = ["standard"], version = "^0.30.0" }
+
+requests = "^2.32.0"
+xmltodict = "^0.13.0"
+python-dotenv = "^1.0.1"
+httpx = "^0.28.1"
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.4.0"
+isort = "^5.13.0"
+ruff = "^0.5.0"
+mypy = "^1.10.0"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
