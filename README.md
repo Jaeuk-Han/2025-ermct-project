@@ -212,7 +212,7 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
   - **응답**: `list[RecommendedHospital]`
 
 - `POST /api/triage/candidates`
-  - **설명**: `'가능 수술 기준' 상세 후보 병원 리스트`를 반환하는 디버그/고급용 API
+  - **설명**: `'가능 수술 기준' 상세 후보 병원 리스트`를 반환하는 디버그용 API
     - 로직은 `/api/triage/recommend`와 비슷하지만,
     - **케이스 정보 + 후보 병원 리스트**를 하나의 객체(`RoutingCandidateResponse`)로 내려줌
   - **요청 Body**: `TriageRequest` (위와 동일 구조)
@@ -222,7 +222,7 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
       - 각 병원별 procedure_beds, groups_with_beds, coverage_score, priority_score, reason_summary 등 상세 정보 포함
 
   > 사용 용도
-  > - `/api/triage/recommend` → 간단한 추천 리스트 (리스트만)  
+  > - `/api/triage/recommend` → 간단한 추천 리스트
   > - `/api/triage/candidates` → **케이스 + 디테일한 후보 병원 정보** (튜닝/로그용)
 
 ### 4.6 병상 예약(in-memory) 관리
@@ -231,8 +231,7 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
 
 - `POST /api/triage/reservations`
   - **설명**: 선택된 병원에 대해 **이 complaint 환자를 보낸다**는 가상의 예약을 등록
-    - complaint → procedure group → bed_types 체인으로 대표 bed_type(보통 ER)을 하나 골라
-    - `pending_assignments[hpid][bed_type]` 값을 증가시킴
+    - complaint → procedure group → bed_types 체인으로 대표 bed_type(보통 ER)을 하나 골라 `pending_assignments[hpid][bed_type]` 값을 증가시킴
     - 이후 effective_beds 계산 시 해당 예약 수만큼 감산됨
   - **요청 Body**: `BedReservationRequest`
     ```json
