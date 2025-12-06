@@ -210,8 +210,6 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
     }
     ```
   - **응답**: `list[RecommendedHospital]`
-    - 환자 KTAS/complaint, 병원 기본 정보, procedure별 병상, coverage_level, reason_summary 등이 포함됨
-    - 프론트에서 **리스트 뿌리기**에 바로 쓰기 좋은 형태
 
 - `POST /api/triage/candidates`
   - **설명**: `'가능 수술 기준' 상세 후보 병원 리스트`를 반환하는 디버그/고급용 API
