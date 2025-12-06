@@ -245,7 +245,6 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
       "num_patients": 1
     }
     ```
-  - **응답**: 단순 성공/실패 (`{"ok": true}` 형태, 구현에 따라 다를 수 있음)
 
 - `POST /api/triage/reservations/release`
   - **설명**: 위에서 만든 예약을 **취소/해제**하는 API  
@@ -261,7 +260,6 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
       "num_patients": 1
     }
     ```
-  - **응답**: 성공 시 pending 상태가 조정됨
 
 ### 4.7 KTAS 모듈 연동용 라우팅 API (서울 전체)
 
