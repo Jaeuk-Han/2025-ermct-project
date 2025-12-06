@@ -22,8 +22,18 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
   - 병원별 **수술/시술 능력(procedure group)** 및 가용 병상 계산
 
 - 10개 주증상 카테고리 기반 트리아지
-  - 가슴 통증, 호흡곤란, 신경학적 증상, 복통/소화기, 출혈, 의식 변화,
-    외상, 산부인과, 소아, 정신과 응급 등 10개 카테고리
+  ```text
+  1. 가슴 통증 (Chest pain)
+  2. 호흡곤란 (Dyspnea / Respiratory distress)
+  3. 신경학적 증상 (Stroke-like symptoms: 편마비, 말어눌함, 경련)
+  4. 복통 / 소화기 증상 (Abdominal pain / GI bleeding / vomiting)
+  5. 출혈 (External bleeding / hematemesis / melena)
+  6. 의식 변화 (Altered mental status / syncope)
+  7. 외상 (Trauma: 교통사고, 낙상, 절단, 화상 포함)
+  8. 산부인과 응급 (OB-GYN emergency: 분만, 산과/부인과 통증)
+  9. 소아 응급 (Pediatric acute illness: 열, 경련, 탈수 등)
+  10. 정신과적 응급 (Psychiatric emergency: 자살위험, 폭력성, 급성정신병)
+  ```
   - 각 주증상 → 필요한 수술/시술 그룹(procedure groups)으로 매핑
   - 실시간 병상 + pending assignment를 고려한 **effective beds** 계산
 
