@@ -1,18 +1,340 @@
-# P-실무 임시 공유
+# Seoul ER Triage (임시)
 
-## 실행 명령어
+서울시 응급의료정보 OpenAPI를 기반으로, **구급대원(Paramedic)** 을 위한  
+응급환자 **병원 분류(트리아지)·추천 백엔드**입니다.
+
+ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정보**를 바탕으로,  
+서울 시내 응급의료기관의 **실시간 병상 / 중증질환 수용 정보 / 장비 가용성**을 종합해  
+환자에게 적합한 병원을 추천하는 것을 목표로 합니다.
+
+---
+
+## 1. 주요 기능 개요
+
+- 서울시 응급의료정보 OpenAPI 파싱&래핑
+  - 실시간 응급실/중환자실 병상 정보 조회
+  - 응급의료기관 기본 정보(주소, 전화, 위경도 등)
+  - 중증질환 수용 가능 정보 (MKioskTy1~27)
+  - 응급실/중증 관련 메시지 (장비 고장, 병상 과밀, 수용불가 등)
+  - 권역외상센터 목록 조회
+
+- 병원 단위 통합 요약 모델 (`HospitalSummary`)
+  - 기본정보 + 실시간 병상 + 중증 수용 정보 + 메시지 + 외상센터 여부를 하나로 묶어서 반환
+  - 병원별 **수술/시술 능력(procedure group)** 및 가용 병상 계산
+
+- 10개 주증상 카테고리 기반 트리아지
+  - 가슴 통증, 호흡곤란, 신경학적 증상, 복통/소화기, 출혈, 의식 변화,
+    외상, 산부인과, 소아, 정신과 응급 등 10개 카테고리
+  - 각 주증상 → 필요한 수술/시술 그룹(procedure groups)으로 매핑
+  - 실시간 병상 + pending assignment를 고려한 **effective beds** 계산
+
+- 병원 추천 API
+  - 입력: `KTAS`, `complaint_id(주증상)`, `sido`, `sigungu`, (옵션) `home_hpid`
+  - 출력: 추천 병원 리스트 + 각 병원의 추천 사유 요약(reason summary)
+
+---
+
+## 2. 기술 스택
+
+- **Backend Framework**: FastAPI
+- **Language**: Python 3.11+
+- **Config / Env**: `python-dotenv` (.env)
+- **HTTP Client**: `requests`
+- **XML Parsing**: `xmltodict`
+- **Data Model**: Pydantic (BaseModel)
+
+---
+
+## 3. 디렉토리 / 모듈 구조
+
+주요 모듈과 역할은 다음과 같습니다:
+
+- `app/main.py`
+  - FastAPI 엔트리포인트
+  - `/health`, `/api/hospitals/*`, `/api/triage/recommend` 등 주요 엔드포인트 정의
+  - 시·군·구 단위 병원 요약 생성, 트리아지 요청 처리 로직 포함
+
+- `app/services/ermct_client.py`
+  - 서울시 응급의료정보 OpenAPI 래퍼
+  - `get_realtime_beds`, `get_basic_info`, `get_serious_acceptance`,
+    `get_emergency_messages`, `get_trauma_centers` 등 HTTP 호출 + XML 파싱 담당
+
+- `app/schemas.py`
+  - Pydantic 데이터 모델 정의
+  - `HospitalRealtime`, `HospitalBasicInfo`, `SeriousDiseaseStatus`,
+    `HospitalMessage`, `HospitalSummary`,
+    `TriageRequest`, `RecommendedHospital` 등
+
+- `app/complaint_mapping.py`
+  - 10개 **주증상 카테고리(COMPLAINT_LABELS)** 정의
+  - 공공데이터의 `MKioskTyXX` → 주증상 카테고리 ID 매핑
+  - 각 주증상 → 필요한 수술/시술 그룹 리스트 매핑
+    (예: 가슴 통증 → `ACS_MI`, `AORTIC_EMERGENCY`, `IR_INTERVENTION`)
+
+- `app/procedure_groups.py`
+  - 수술/시술 그룹(Procedure Group) 정의
+    - 예: `ACS_MI`, `ACS_STROKE`, `ABDOMINAL_EMERGENCY`,
+      `GI_ENDOSCOPY`, `OB_EMERGENCY`, `PSYCHIATRIC_EMERGENCY` 등
+  - 각 그룹별로
+    - 라벨(화면용 이름)
+    - 참조할 MKioskTy 키
+    - 메시지 코드(Y코드)
+    - 관련 병상 타입 리스트(`bed_types`: `er`, `icu_general`, `or` 등)
+  - 병원 메시지 차단 여부 등을 고려해
+    **병원별 수술/시술 가능 여부 계산 함수** 제공
+
+- `app/config_beds.py`
+  - 공공데이터 원시 필드(hv*, hvs*)를  
+    도메인 병상 타입(`er`, `or`, `icu_general`, `icu_neonatal`, `ward_psych` 등)으로 맵핑
+  - `BED_TYPE_FUNCS`: 각 bed_type → 실시간 가용병상 계산 함수
+
+- `app/triage_utils.py`
+  - 병상 가용성 계산 유틸
+    - 특정 `bed_types`에 대해 API 기준 가용 병상 / pending 반영한 effective beds 계산
+    - 여러 procedure group의 `bed_types` 합집합으로 effective beds 계산
+  - `choose_primary_bed_type`: 예약 시 사용될 대표 bed_type 선택 로직
+  - `procedure_status_for_hospital`: 한 병원에 대해 group별 병상 상태 정리
+
+- `app/state_assignments.py`
+  - 메모리 상의 **pending assignments** 상태 관리
+  - `pending_assignments[hpid][bed_type] = 현재 그 병원 해당 병상으로 보내기로 한 환자 수`
+  - 현재 병원으로 향하는 환자가 있는 경우 일부 병상의 수를 감산하는 것을 통해 안정성을 올림
+
+- `app/config.py`
+  - `.env`에서 `ERMCT_SERVICE_KEY` 로딩
+  - 값이 없을 경우 RuntimeError 발생 (환경 변수 필수)
+
+---
+
+## 4. API 엔드포인트 정리
+
+### 4.1 Health Check
+
+- `GET /health`
+  - 단순 상태 확인용 (`{"status": "ok"}`)
+
+### 4.2 병원 정보 기본/실시간/중증
+
+- `GET /api/hospitals/realtime`
+  - **설명**: 특정 시/군/구 기준 실시간 응급실/중환자실 병상 정보 조회
+  - **쿼리 파라미터**
+    - `sido`: 시도명 (예: `서울특별시`)
+    - `sigungu`: 시군구명 (예: `강남구`)
+    - `num_rows`: 최대 병원 수 (기본 50)
+
+- `GET /debug/hospitals/realtime/xml`
+  - **설명**: `getEmrrmRltmUsefulSckbdInfoInqire` API의 **원시 XML** 확인용 디버그 엔드포인트
+  - **쿼리 파라미터**
+    - `sido`, `sigungu`: 위와 동일
+    - `num_rows` (int, 기본 5)
+    - `page_no` (int, 기본 1)
+
+- `GET /debug/hospitals/serious/xml`
+
+- **설명**: `getSrsillDissAceptncPosblInfoInqire` Operation의 **원시 XML** 확인용
+  - **쿼리 파라미터**
+    - `sido`, `sigungu`, `sm_type`, `num_rows`, `page_no`
+
+- `GET /api/hospitals/basic`
+  - **설명**: HPID 기준 응급의료기관 기본 정보 조회
+  - **쿼리 파라미터**
+    - `hpid`: 병원 기관 코드 (예: `A1100010`)
+
+- `GET /api/hospitals/serious`
+  - **설명**: 중증질환 수용 가능 정보 (MKioskTy1~27) 조회
+  - **쿼리 파라미터**
+    - `sido`, `sigungu`
+    - `sm_type`: 분류 타입 (기본 1)
+    - `num_rows`, `page_no`
+
+- `GET /api/hospitals/messages`
+  - **설명**: 응급실/중증 관련 메시지(장비고장, 수용불가 등) 조회
+  - **쿼리 파라미터**
+    - `hpid`
+    - `num_rows`, `page_no`
+
+### 4.3 병원 요약 / 지역별 요약
+
+- `GET /api/hospitals/summary`
+  - **설명**: 단일 병원(HPID)에 대한 통합 요약 정보
+  - **쿼리 파라미터**
+    - `hpid` (필수)
+    - `sido`, `sigungu` (옵션: 함께 주면 해당 지역의 실시간/중증정보를 같이 묶어줌)
+    - `sm_type` (기본 1)
+
+- `GET /api/hospitals/summary/by-region`
+  - **설명**: 특정 시/군/구 내 모든 응급의료기관에 대한 요약 리스트
+  - **쿼리 파라미터**
+    - `sido`, `sigungu`
+    - `sm_type` (기본 1)
+    - `num_rows` (기본 200)
+
+### 4.4 트리아지 / 병원 추천
+
+- `POST /api/triage/recommend`
+  - **설명**: 프리호스피탈 단계의 triage 정보(KTAS + 주증상 + 지역)를 기반으로  
+    해당 지역 내 **수술/시술 가능 + 병상 남아있는** 병원만 필터링하여 추천
+  - **요청 Body (TriageRequest) 예시**
+    ```json
+    {
+      "ktas": 2,
+      "complaint_id": 1,
+      "sido": "서울특별시",
+      "sigungu": "노원구",
+      "home_hpid": "A1100010",
+      "note": "가슴통증 1시간 전 발생, 혈압 저하"
+    }
+    ```
+  - **동작 요약**
+    1. `complaint_id` → 필요한 procedure group 리스트로 변환
+    2. `sido`, `sigungu` 기준 병원 요약 리스트 조회
+    3. 각 병원에 대해
+       - 해당 procedure group에 대한 수술/시술 가능 여부
+       - bed_types 합집합 기준 effective beds 계산
+    4. effective beds > 0 인 병원들만 추천 리스트로 반환
+
+### 4.5 트리아지 / 병원 추천 (지역 기준)
+
+- `POST /api/triage/recommend`
+  - **설명**: **프리호스피탈 단계용 기본 병원 추천 API**
+    - KTAS + complaint + 지역 정보를 받아
+    - 수술/시술 가능 + 병상 남아있는 병원만 필터링해서 **간단한 추천 리스트** 반환
+  - **요청 Body**: `TriageRequest`
+    ```json
+    {
+      "ktas": 2,
+      "complaint_id": 1,
+      "sido": "서울특별시",
+      "sigungu": "노원구",
+      "home_hpid": "A1100010",
+      "note": "가슴통증 1시간 전 발생, 혈압 저하"
+    }
+    ```
+  - **응답**: `list[RecommendedHospital]`
+    - 환자 KTAS/complaint, 병원 기본 정보, procedure별 병상, coverage_level, reason_summary 등이 포함됨
+    - 프론트에서 **리스트 뿌리기**에 바로 쓰기 좋은 형태
+
+- `POST /api/triage/candidates`
+  - **설명**: `'가능 수술 기준' 상세 후보 병원 리스트`를 반환하는 디버그/고급용 API
+    - 로직은 `/api/triage/recommend`와 비슷하지만,
+    - **케이스 정보 + 후보 병원 리스트**를 하나의 객체(`RoutingCandidateResponse`)로 내려줌
+  - **요청 Body**: `TriageRequest` (위와 동일 구조)
+  - **응답**: `RoutingCandidateResponse`
+    - `case`: `RoutingCase` (KTAS, complaint, 필요한 procedure group 목록 등)
+    - `hospitals`: `list[RoutingCandidateHospital]`
+      - 각 병원별 procedure_beds, groups_with_beds, coverage_score, priority_score, reason_summary 등 상세 정보 포함
+
+  > 정리하자면  
+  > - `/api/triage/recommend` → 간단한 추천 리스트 (리스트만)  
+  > - `/api/triage/candidates` → **케이스 + 디테일한 후보 병원 정보** (튜닝/로그용)
+
+### 4.6 병상 예약(in-memory) 관리
+
+> 실제 병원 EMR 예약은 아니고, **백엔드 내부 pending_assignments** 상태만 관리하는 용도.
+
+- `POST /api/triage/reservations`
+  - **설명**: 선택된 병원에 대해 **이 complaint 환자를 보낸다**는 가상의 예약을 등록
+    - complaint → procedure group → bed_types 체인으로 대표 bed_type(보통 ER)을 하나 골라
+    - `pending_assignments[hpid][bed_type]` 값을 증가시킴
+    - 이후 effective_beds 계산 시 해당 예약 수만큼 감산됨
+  - **요청 Body**: `BedReservationRequest`
+    ```json
+    {
+      "hpid": "A1100010",
+      "complaint_id": 1,
+      "ktas": 2,
+      "num_patients": 1
+    }
+    ```
+  - **응답**: 단순 성공/실패 (`{"ok": true}` 형태, 구현에 따라 다를 수 있음)
+
+- `POST /api/triage/reservations/release`
+  - **설명**: 위에서 만든 예약을 **취소/해제**하는 API  
+    (환자 미도착, 오접수 등 상황 표현용)
+    - 같은 complaint → procedure group → bed_types 체인을 이용해
+    - 대표 bed_type의 pending_assignments를 감소시킴
+  - **요청 Body**: `BedReleaseRequest`
+    ```json
+    {
+      "hpid": "A1100010",
+      "complaint_id": 1,
+      "ktas": 2,
+      "num_patients": 1
+    }
+    ```
+  - **응답**: 성공 시 pending 상태가 조정됨
+
+### 4.7 KTAS 모듈 연동용 라우팅 API (서울 전체)
+
+> 최종적으로 사용할 POST 엔드포인트
+
+- `POST /api/ktas/route/seoul`
+  - **설명**: **KTAS 모듈에서 바로 호출하는 전용 라우팅 API**
+    - 입력: KTAS 등급 + `chief_complaint` 텍스트 + 평소 다니던 병원(선택)
+    - 서울 전체 병원 중
+      - chief_complaint → 내부 `complaint_id(1~10)` 매핑
+      - 해당 complaint가 요구하는 procedure group을 수용 가능하고
+      - 그 기준으로 effective_beds > 0 인 병원만 후보로 필터링
+    - 최종적으로 `RoutingCandidateResponse` 형태로 반환
+  - **요청 Body**: `KTASRoutingRequest`
+    ```json
+    {
+      "ktas_level": 2,
+      "chief_complaint": "가슴 통증",
+      "hospital_followup": "A1100010"
+    }
+    ```
+  - **응답**: `RoutingCandidateResponse`
+    - `/api/triage/candidates`와 동일한 스키마
+
+---
+
+## 5. 설치 및 실행 방법
+
+### 5.1 사전 준비
+
+- Python 3.11+
+- (권장) Poetry
+- 자세한 의존성에 대해서는 루트의 pyproject.toml을 참고해주세요
+
+### 5.2 환경 변수 설정
+
+루트 디렉토리에 `.env` 파일을 생성하고, 서울시 응급의료정보 OpenAPI 키를 설정합니다.
+
+```env
+ERMCT_SERVICE_KEY=여기에_본인_API_키_입력
+```
+
+
+### 실행 명령어
 
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
-## Fast API Swagger
+### Fast API Swagger
+
+Chrome 등의 브라우저에서 아래의 url 입력
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-## 현재 출력 예제
+## 6. 출력 예제
 
+다음은 Swagger에서 테스트 한 결과입니다.
+
+### 예시 입력
+
+```json
+{
+  "ktas_level": 2,
+  "chief_complaint": "dyspnea",
+  "hospital_followup": "서울대학교병원"
+}
+```
+
+
+### 출력
 ```json
 {
   "followup_id": "A1100017",
