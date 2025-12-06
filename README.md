@@ -130,10 +130,9 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
     - `page_no` (int, 기본 1)
 
 - `GET /debug/hospitals/serious/xml`
-
-- **설명**: `getSrsillDissAceptncPosblInfoInqire` Operation의 **원시 XML** 확인용
-  - **쿼리 파라미터**
-    - `sido`, `sigungu`, `sm_type`, `num_rows`, `page_no`
+  - **설명**: `getSrsillDissAceptncPosblInfoInqire` Operation의 **원시 XML** 확인용
+    - **쿼리 파라미터**
+      - `sido`, `sigungu`, `sm_type`, `num_rows`, `page_no`
 
 - `GET /api/hospitals/basic`
   - **설명**: HPID 기준 응급의료기관 기본 정보 조회
@@ -224,7 +223,7 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
     - `hospitals`: `list[RoutingCandidateHospital]`
       - 각 병원별 procedure_beds, groups_with_beds, coverage_score, priority_score, reason_summary 등 상세 정보 포함
 
-  > 정리하자면  
+  > 사용 용도
   > - `/api/triage/recommend` → 간단한 추천 리스트 (리스트만)  
   > - `/api/triage/candidates` → **케이스 + 디테일한 후보 병원 정보** (튜닝/로그용)
 
