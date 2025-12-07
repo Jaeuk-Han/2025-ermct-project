@@ -24,6 +24,7 @@ from app.schemas import (
     RoutingCase,
     KTASRoutingRequest,
     RoutingCandidateResponse,
+    NearestRoutingRequest,
 )
 from app.triage_utils import (
     procedure_status_for_hospital,
@@ -43,6 +44,9 @@ from app.complaint_mapping import (
     complaint_id_from_chief_complaint,
     COMPLAINT_LABELS,
 )
+
+# 3단계 import
+from .distance_logic import calculate_all_distances_async, get_top3
 
 SERIOUS_MKIOSK_KEYS = [f"MKioskTy{i}" for i in range(1, 28)]  # 1 ~ 27
 
@@ -1358,3 +1362,61 @@ def route_from_ktas_seoul(req: KTASRoutingRequest = Body(...)):
         hospitals=candidates,
     )
 
+@app.post(
+    "/api/ktas/route/seoul/nearest",
+    response_model=RoutingCandidateResponse,
+)
+async def route_seoul_nearest(
+    req: NearestRoutingRequest = Body(...)
+):
+    """
+    1단계 라우팅 결과(서울 전체 후보들) + 사용자 위치를 받아,
+    Tmap 거리 기준 상위 3개 병원만 골라 distance/duration_sec을 채워서 반환.
+    """
+
+    # 1) distance_logic에 줄 payload 구성
+    hospitals_payload = [
+        {
+            "name": h.name,
+            "latitude": h.latitude,
+            "longitude": h.longitude,
+            "reason_summary": h.reason_summary,
+        }
+        for h in req.hospitals
+    ]
+
+    # 2) Tmap API로 모든 후보 병원까지 거리/시간 계산
+    results = await calculate_all_distances_async(
+        user_lat=req.user_lat,
+        user_lon=req.user_lon,
+        hospitals=hospitals_payload,
+    )
+
+    # 3) 거리 기준 상위 3개만 선택
+    top3_results = get_top3(results)
+
+    # 4) name 기준으로 매핑 (이름이 중복될 가능성이 낮다고 가정)
+    result_by_name = {r["name"]: r for r in top3_results}
+
+    top3_hospitals: List[RoutingCandidateHospital] = []
+
+    for h in req.hospitals:
+        r = result_by_name.get(h.name)
+        if not r:
+            continue
+
+        # 기존 필드는 그대로 두고 distance, duration만 덧입힘
+        data = h.model_dump()
+        data["distance"] = float(r["distance"])
+        data["duration_sec"] = int(r["duration_sec"])
+
+        top3_hospitals.append(RoutingCandidateHospital(**data))
+
+    # 5) followup_id는 그대로 유지, 병원 리스트만 top3로 교체
+    return RoutingCandidateResponse(
+        followup_id=req.followup_id,
+        case=req.case,
+        user_lat=req.user_lat,
+        user_lon=req.user_lon,
+        hospitals=top3_hospitals,
+    )

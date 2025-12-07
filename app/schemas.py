@@ -363,8 +363,22 @@ class RoutingCandidateHospital(BaseModel):
     priority_score: float
     reason_summary: str
 
+    # 거리 필드 - 3단계용
+    distance: Optional[float] = Field(
+        None,
+        description="사용자 위치에서 병원까지 도로 기준 거리(m, Tmap 결과)",
+    )
+    duration_sec: Optional[int] = Field(
+        None,
+        description="예상 이동 시간(초, Tmap 결과)",
+    )
+
 
 class RoutingCandidateResponse(BaseModel):
     followup_id: Optional[str]  # 평소 다니던 병원 HPID (없으면 null)
     case: RoutingCase
     hospitals: List[RoutingCandidateHospital]
+
+class NearestRoutingRequest(RoutingCandidateResponse):
+    user_lat: float
+    user_lon: float
