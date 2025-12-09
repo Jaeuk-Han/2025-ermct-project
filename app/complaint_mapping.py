@@ -53,7 +53,7 @@ MKIOSK_TO_COMPLAINTS: Dict[str, Set[int]] = {
     "MKioskTy9": {4},
 
     # 10: 장중첩/폐색 (영유아 복통 + 소아 응급)
-    "MKioskTy10": {4, 9},
+    "MKioskTy10": {9},
 
     # 11~12: 위장관 내시경 (복통/소화기 + GI bleeding → 출혈도 함께)
     "MKioskTy11": {4, 5},
