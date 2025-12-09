@@ -1181,7 +1181,22 @@ def release_bed_reservation(req: BedReleaseRequest):
 
 
 # --------------------------------------------------------------------
-# 12) 현재 병상 예약 현황 (디버깅용)
+# 12) 예약 현황 (디버그용) 
+# --------------------------------------------------------------------
+@app.get("/debug/triage/pending-assignments")
+def debug_pending_assignments():
+    """
+    현재 프로세스 메모리에 쌓여 있는 pending_assignments 딕셔너리를 그대로 보여준다.
+    (졸업작품 시연/디버깅용)
+    """
+    # defaultdict → 일반 dict로 변환
+    out: Dict[str, Dict[str, int]] = {}
+    for hpid, bed_map in pending_assignments.items():
+        out[hpid] = dict(bed_map)
+    return out
+
+# --------------------------------------------------------------------
+# 13) 1단계 입력 기준 서울시 내 병원 필터링 (최종) 
 # --------------------------------------------------------------------
 @app.post(
     "/api/ktas/route/seoul",
