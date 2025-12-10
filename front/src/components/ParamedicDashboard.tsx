@@ -79,6 +79,12 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
   const recordTimeoutRef = useRef<number | null>(null);
+  const [patientInfo, setPatientInfo] = useState({
+    name: '',
+    birthdate: '',
+    age: '',
+    gender: '',
+  });
 
   const getToneByLevel = useCallback((level?: number | null) => {
     if (level === 1) return { bg: "bg-red-50", border: "border-red-200", text: "text-red-700" };
@@ -515,59 +521,55 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
               </AnimatePresence>
 
               {/* NEW: KTAS Live Status Display */}
+              {/* Patient Basic Info */}
               <div className="mb-6">
-                 <div className={cn(
-                    "rounded-2xl p-6 border-4 flex items-center justify-between transition-all duration-300 shadow-lg relative overflow-hidden",
-                     patientData.ktasLevel === 1 ? "bg-red-50 border-red-600 shadow-red-100" :
-                     patientData.ktasLevel === 2 ? "bg-orange-50 border-orange-500 shadow-orange-100" :
-                     patientData.ktasLevel === 3 ? "bg-yellow-50 border-yellow-500 shadow-yellow-100" :
-                     patientData.ktasLevel ? "bg-green-50 border-green-500 shadow-green-100" :
-                     "bg-white border-gray-200"
-                 )}>
-                    {patientData.ktasLevel && (
-                        <div className={cn(
-                            "absolute top-0 right-0 w-32 h-32 transform translate-x-8 -translate-y-8 rounded-full opacity-20",
-                            patientData.ktasLevel === 1 ? "bg-red-600" :
-                            patientData.ktasLevel === 2 ? "bg-orange-500" :
-                            patientData.ktasLevel === 3 ? "bg-yellow-500" :
-                            "bg-green-500"
-                        )} />
-                    )}
-                    
-                    <div>
-                       <h3 className="text-gray-500 font-bold text-sm uppercase tracking-widest mb-2 flex items-center gap-2">
-                           <Activity size={16} /> KTAS 자동 분류
-                       </h3>
-                       <p className={cn(
-                          "text-4xl font-black tracking-tight",
-                          patientData.ktasLevel === 1 ? "text-red-600" :
-                          patientData.ktasLevel === 2 ? "text-orange-600" :
-                          patientData.ktasLevel === 3 ? "text-yellow-600" :
-                          patientData.ktasLevel ? "text-green-600" :
-                          "text-gray-400"
-                       )}>
-                          {patientData.ktasLevel ? `Level ${patientData.ktasLevel}` : "판정 대기"}
-                       </p>
-                       <p className="text-sm font-bold text-gray-400 mt-1">
-                           {patientData.ktasLevel === 1 ? "즉각적인 처치가 필요한 위급 상황" : 
-                            patientData.ktasLevel === 2 ? "생명에 위협이 될 수 있는 긴급 상황" :
-                            patientData.ktasLevel === 3 ? "잠재적 응급 상황" :
-                            "정보를 입력하면 자동 계산됩니다"}
-                       </p>
+                <ModernCard className="space-y-4 border-2 border-gray-200">
+                  <div className="flex items-center gap-2 text-sm font-bold text-gray-500 uppercase tracking-widest">
+                    <Activity size={16} /> 환자 기본 정보
+                  </div>
+                  <div className="space-y-3">
+                    <div className="space-y-1">
+                      <p className="text-sm font-bold text-gray-500">환자 이름</p>
+                      <ModernInput
+                        value={patientInfo.name}
+                        onChange={(e) => setPatientInfo((prev) => ({ ...prev, name: e.target.value }))}
+                        placeholder="예) 홍길동 / 김철수"
+                        className="text-lg font-semibold"
+                      />
                     </div>
-                    
-                    <div className={cn(
-                       "h-20 w-20 rounded-2xl flex items-center justify-center font-black text-5xl text-white shadow-md z-10 transition-transform duration-300",
-                       patientData.ktasLevel ? "scale-100" : "scale-95 grayscale opacity-30",
-                       patientData.ktasLevel === 1 ? "bg-red-600" :
-                       patientData.ktasLevel === 2 ? "bg-orange-500" :
-                       patientData.ktasLevel === 3 ? "bg-yellow-500" :
-                       patientData.ktasLevel ? "bg-green-500" :
-                       "bg-gray-200"
-                    )}>
-                       {patientData.ktasLevel || '-'}
+                    <div className="space-y-1">
+                      <p className="text-sm font-bold text-gray-500">생년월일</p>
+                      <ModernInput
+                        value={patientInfo.birthdate}
+                        onChange={(e) => setPatientInfo((prev) => ({ ...prev, birthdate: e.target.value }))}
+                        placeholder="예) 1951-02-14"
+                        className="text-lg font-semibold"
+                      />
                     </div>
-                 </div>
+                    <div className="space-y-1">
+                      <p className="text-sm font-bold text-gray-500">나이</p>
+                      <ModernInput
+                        value={patientInfo.age}
+                        onChange={(e) => setPatientInfo((prev) => ({ ...prev, age: e.target.value }))}
+                        placeholder="예) 73"
+                        className="text-lg font-semibold"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-sm font-bold text-gray-500">성별</p>
+                      <ModernSelect
+                        value={patientInfo.gender}
+                        onChange={(e) => setPatientInfo((prev) => ({ ...prev, gender: e.target.value }))}
+                        className="!text-lg !font-semibold"
+                      >
+                        <option value="">선택</option>
+                        <option value="M">남성</option>
+                        <option value="F">여성</option>
+                        <option value="X">기타/미정</option>
+                      </ModernSelect>
+                    </div>
+                  </div>
+                </ModernCard>
               </div>
 
               {/* Voice Input Button + Stop */}
