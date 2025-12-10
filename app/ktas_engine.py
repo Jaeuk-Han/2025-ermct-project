@@ -340,7 +340,7 @@ STT원문에 기재된 병원명이 정식 병원명 리스트에 있다면 STT�
    - A: 에이/에/애/이  
    - V: 브이/비/브에/비에  
    - P: 피/피에/퍼/피해/프/프에  
-   - U: 유/우/으  
+   - U: 유/우/으/유의  
 입력 내용을 가장 유사한 그룹에 매핑하여 A·V·P·U 중 하나로 정규화합니다.  
 최종 문장은 “의식은 X입니다”로 정리합니다.
 
@@ -1159,10 +1159,17 @@ def build_stage2_payload(ktas_result: dict) -> dict:
     """
     Step2(병원 필터링 엔진)에 넘길 데이터 스키마 생성
     """
+    # chief_complaint가 없으면 None으로 떨어져 Pydantic에서 500이 나므로 안전하게 기본값을 넣어준다.
+    cc = (
+        ktas_result.get("chief_complaint")
+        or ktas_result.get("sbar", {}).get("S", {}).get("chief_complaint")
+        or "unknown"
+    )
+
     return {
         "ktas_level": ktas_result["ktas"],                # 1 / 2 / 3
-        "chief_complaint": ktas_result["chief_complaint"], # dyspnea / chest_pain ...
-        "hospital_followup": ktas_result["followup_hospital"]  # 정식 병원명 or None
+        "chief_complaint": cc,                            # dyspnea / chest_pain ... (fallback: "unknown")
+        "hospital_followup": ktas_result.get("followup_hospital")  # 정식 병원명 or None
     }
 
 

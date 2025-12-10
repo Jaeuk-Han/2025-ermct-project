@@ -47,7 +47,7 @@ interface ParamedicDashboardProps {
   onLogout: () => void;
 }
 
-type ViewState = 'input' | 'list' | 'confirm' | 'transferring' | 'completed';
+type ViewState = 'input' | 'review' | 'list' | 'confirm' | 'transferring' | 'completed';
 
 export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName, onLogout }) => {
   const [view, setView] = useState<ViewState>('input');
@@ -55,6 +55,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   // Separate states for Listening vs Processing
   const [isListening, setIsListening] = useState(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
+  const [ktasLocked, setKtasLocked] = useState(false); // 백엔드에서 받은 KTAS가 있으면 자동 계산을 잠금
   
   const [patientData, setPatientData] = useState<PatientData>({
     consciousness: 'Alert',
@@ -79,8 +80,17 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const mediaChunksRef = useRef<Blob[]>([]);
   const recordTimeoutRef = useRef<number | null>(null);
 
+  const getToneByLevel = useCallback((level?: number | null) => {
+    if (level === 1) return { bg: "bg-red-50", border: "border-red-200", text: "text-red-700" };
+    if (level === 2) return { bg: "bg-orange-50", border: "border-orange-200", text: "text-orange-700" };
+    if (level === 3) return { bg: "bg-yellow-50", border: "border-yellow-200", text: "text-yellow-700" };
+    return { bg: "bg-gray-50", border: "border-gray-200", text: "text-gray-700" };
+  }, []);
+
   // KTAS Logic
   useEffect(() => {
+    if (ktasLocked) return; // 백엔드 KTAS가 이미 있으면 자동 계산하지 않음
+
     let level: number | null = null;
     const symptom = patientData.symptoms?.toLowerCase() || '';
     
@@ -98,7 +108,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     }
 
     setPatientData(prev => ({ ...prev, ktasLevel: level }));
-  }, [patientData.symptoms, patientData.respiration, patientData.consciousness]);
+  }, [ktasLocked, patientData.symptoms, patientData.respiration, patientData.consciousness]);
 
   // Map backend hospital to UI model
   const mapToHospital = useCallback((h: RoutingCandidateHospital): Hospital => ({
@@ -278,13 +288,32 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
           const result = await predictAudio(formData);
           setRoutingResponse(result);
+
+          const vitals = result.stt_vitals || {};
+          const avpu = (vitals as any).avpu || (vitals as any).AVPU;
+          const rr = (vitals as any).rr ?? (vitals as any).RR;
+          const bpSys = (vitals as any).bp_sys ?? (vitals as any).BP_sys ?? (vitals as any).BP_SYS;
+          const bpDia = (vitals as any).bp_dia ?? (vitals as any).BP_dia ?? (vitals as any).BP_DIA;
+          const hr = (vitals as any).hr ?? (vitals as any).HR;
+          const bt = (vitals as any).bt ?? (vitals as any).BT;
           setPatientData((prev) => ({
             ...prev,
             ktasLevel: result.case?.ktas ?? prev.ktasLevel,
             symptoms: result.case?.complaint_label ?? prev.symptoms,
+            consciousness: avpu || prev.consciousness,
+            respiration: rr != null ? String(rr) : prev.respiration,
+            bloodPressure:
+              bpSys != null && bpDia != null
+                ? `${bpSys}/${bpDia}`
+                : prev.bloodPressure,
+            pulse: hr != null ? String(hr) : prev.pulse,
+            temperature: bt != null ? String(bt) : prev.temperature,
           }));
+          if (result.case?.ktas != null) {
+            setKtasLocked(true);
+          }
           setHospitals(result.hospitals.slice(0, 3).map(mapToHospital));
-          setView("list");
+          setView("review");
         } catch (err) {
           console.error("음성 전송 실패:", err);
           alert("음성 인식에 실패했습니다. 다시 시도해 주세요.");
@@ -374,6 +403,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
   const handleReset = () => {
     setView('input');
+    setKtasLocked(false);
     setPatientData({
       consciousness: 'Alert',
       respiration: '',
@@ -388,6 +418,8 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     setRequestStatus('waiting');
     setCurrentRequestId(null);
   };
+
+  const tone = getToneByLevel(patientData.ktasLevel);
 
   return (
     <div className="flex flex-col min-h-screen bg-[#F5F7FA] max-w-md mx-auto relative shadow-2xl overflow-hidden font-sans text-slate-800">
@@ -679,10 +711,108 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                             <div className="text-4xl leading-none">{patientData.ktasLevel}</div>
                         </div>
                     )}
-                    <ModernButton onClick={() => setView('list')} className="flex-1 shadow-lg shadow-teal-200 h-16 text-2xl" size="lg">
-                        병원 추천 받기
+                    <ModernButton onClick={() => setView('review')} className="flex-1 shadow-lg shadow-teal-200 h-16 text-2xl" size="lg">
+                        KTAS 확인 후 추천
                     </ModernButton>
                  </div>
+              </div>
+            </motion.div>
+          )}
+
+          {/* VIEW: REVIEW (KTAS & patient info) */}
+          {view === 'review' && (
+            <motion.div
+              key="review"
+              className="flex-1 overflow-y-auto p-4 pb-8 bg-[#F5F7FA]"
+              initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: -20, opacity: 0 }}
+            >
+              <div className="flex items-center gap-2 mb-6">
+                <div className="p-2 bg-teal-50 rounded-lg">
+                  <Stethoscope size={24} className="text-[#00796B]" />
+                </div>
+                <h2 className={TEXT_TITLE}>KTAS 판정 및 환자 정보</h2>
+              </div>
+
+              <ModernCard
+                className={cn(
+                  "space-y-4 border-2",
+                  tone.bg,
+                  tone.border
+                )}
+              >
+                <div className="flex items-center gap-4">
+                  <div
+                    className={cn(
+                      "h-16 w-16 rounded-2xl border-2 flex items-center justify-center text-3xl font-black",
+                      patientData.ktasLevel === 1
+                        ? "bg-red-600 border-red-700 text-white"
+                        : patientData.ktasLevel === 2
+                        ? "bg-orange-500 border-orange-600 text-white"
+                        : patientData.ktasLevel === 3
+                        ? "bg-yellow-500 border-yellow-600 text-white"
+                        : "bg-gray-50 border-gray-200 text-gray-500"
+                    )}
+                  >
+                    {patientData.ktasLevel ?? "-"}
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-500 font-bold">KTAS</p>
+                    <p className="text-xl font-black text-gray-900">
+                      {patientData.ktasLevel ? `Level ${patientData.ktasLevel}` : "미계산"}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="text-sm text-gray-500 font-bold mb-1">주증상</p>
+                  <p className="text-lg font-semibold text-gray-900 whitespace-pre-wrap leading-relaxed">
+                    {patientData.symptoms || "입력되지 않음"}
+                  </p>
+                </div>
+
+                <div className={cn("rounded-2xl p-3", getToneByLevel(patientData.ktasLevel).bg, getToneByLevel(patientData.ktasLevel).border)}>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                      <p className="text-sm text-gray-500 font-bold mb-1">의식(AVPU)</p>
+                      <p className="text-2xl font-black text-gray-800">{patientData.consciousness || "-"}</p>
+                    </div>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                      <p className="text-sm text-gray-500 font-bold mb-1">호흡수</p>
+                      <p className="text-2xl font-black text-gray-800">{patientData.respiration || "-"}</p>
+                    </div>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                      <p className="text-sm text-gray-500 font-bold mb-1">혈압</p>
+                      <p className="text-2xl font-black text-gray-800">{patientData.bloodPressure || "-"}</p>
+                    </div>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                      <p className="text-sm text-gray-500 font-bold mb-1">맥박</p>
+                      <p className="text-2xl font-black text-gray-800">{patientData.pulse || "-"}</p>
+                    </div>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)] col-span-2">
+                      <p className="text-sm text-gray-500 font-bold mb-1">체온</p>
+                      <p className="text-2xl font-black text-gray-800">{patientData.temperature || "-"}</p>
+                    </div>
+                  </div>
+                </div>
+              </ModernCard>
+
+              <div className="mt-8 flex gap-3">
+                <ModernButton
+                  variant="primary"
+                  size="full"
+                  onClick={() => setView('list')}
+                  className="flex-1"
+                >
+                  병원 추천 보기
+                </ModernButton>
+                <ModernButton
+                  variant="secondary"
+                  size="full"
+                  onClick={() => setView('input')}
+                  className="flex-1"
+                >
+                  정보 다시 입력
+                </ModernButton>
               </div>
             </motion.div>
           )}

@@ -56,10 +56,22 @@ export interface RoutingCandidateHospital {
   duration_sec?: number;
 }
 
+export interface STTVitals {
+  avpu?: string;
+  rr?: number;
+  bp_sys?: number;
+  bp_dia?: number;
+  hr?: number;
+  bt?: number;
+  spo2?: number;
+  [key: string]: any;
+}
+
 export interface RoutingCandidateResponse {
   followup_id?: string | null;
   case: RoutingCase;
   hospitals: RoutingCandidateHospital[];
+  stt_vitals?: STTVitals | null;
 }
 
 export interface KtasRoutePayload {

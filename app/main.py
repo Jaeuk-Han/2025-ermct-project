@@ -1483,5 +1483,8 @@ async def predict_audio(audio: UploadFile = File(...)):
     print("="*60 + "\n")
     # ====================================================
 
-    # 4. 최종 리턴
-    return final_response
+    # 4. STT vitals를 응답에 포함해서 리턴
+    result_dict = final_response.model_dump()
+    stt_vitals = stage1_result.get("sbar", {}).get("A", {}) if isinstance(stage1_result, dict) else {}
+    result_dict["stt_vitals"] = stt_vitals
+    return RoutingCandidateResponse(**result_dict)

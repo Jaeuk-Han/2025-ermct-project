@@ -378,6 +378,10 @@ class RoutingCandidateResponse(BaseModel):
     followup_id: Optional[str]  # 평소 다니던 병원 HPID (없으면 null)
     case: RoutingCase
     hospitals: List[RoutingCandidateHospital]
+    stt_vitals: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="음성 인식(STT)에서 추출된 활력징후/AVPU 요약 (keys: avpu, rr, bp_sys, bp_dia, hr, bt, spo2 등)",
+    )
 
 class NearestRoutingRequest(RoutingCandidateResponse):
     user_lat: float
