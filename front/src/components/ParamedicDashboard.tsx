@@ -175,10 +175,17 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
   // Kick off base fetch when entering list view
   useEffect(() => {
-    if (view === 'list') {
+    if (view === 'list' && (!routingResponse || routingResponse.hospitals.length === 0)) {
       fetchBackendHospitals();
     }
   }, [fetchBackendHospitals, view]);
+
+  // Sync hospitals when routingResponse is already available (e.g., from voice)
+  useEffect(() => {
+    if (routingResponse?.hospitals?.length) {
+      setHospitals(routingResponse.hospitals.slice(0, 3).map(mapToHospital));
+    }
+  }, [routingResponse, mapToHospital]);
 
   // Request geolocation when entering list view (best-effort)
   useEffect(() => {
@@ -192,8 +199,9 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
       },
       (err) => {
         console.warn('Geolocation error', err);
+        // 위치가 안 잡혀도 앱이 멈추지 않도록 그대로 진행
       },
-      { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
     );
   }, [locationRequested, view]);
 
@@ -270,6 +278,11 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
           const result = await predictAudio(formData);
           setRoutingResponse(result);
+          setPatientData((prev) => ({
+            ...prev,
+            ktasLevel: result.case?.ktas ?? prev.ktasLevel,
+            symptoms: result.case?.complaint_label ?? prev.symptoms,
+          }));
           setHospitals(result.hospitals.slice(0, 3).map(mapToHospital));
           setView("list");
         } catch (err) {

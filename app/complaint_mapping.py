@@ -160,6 +160,7 @@ CHIEF_COMPLAINT_CODE_TO_ID: dict[str, int] = {
     "stroke_like": 3,
 
     # 4. 복통 / 소화기
+    "abdominal": 4,
     "abdominal_pain": 4,
     "gi_symptom": 4,
 
@@ -168,6 +169,7 @@ CHIEF_COMPLAINT_CODE_TO_ID: dict[str, int] = {
 
     # 6. 의식 변화
     "ams": 6,
+    "altered": 6,
     "altered_mental_status": 6,
 
     # 7. 외상
