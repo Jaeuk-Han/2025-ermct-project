@@ -111,3 +111,7 @@ export async function predictAudio(formData: FormData): Promise<RoutingCandidate
   }
   return res.json() as Promise<RoutingCandidateResponse>;
 }
+
+export async function predictText(text: string): Promise<RoutingCandidateResponse> {
+  return postJson<RoutingCandidateResponse>("/api/ktas/predict-text", { text });
+}

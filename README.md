@@ -1,4 +1,4 @@
-# Seoul ER Triage (임시)
+﻿# VITAL (**V**oice-based **I**ntelligent **T**riage & **A**mbulance **L**ink)
 
 서울시 응급의료정보 OpenAPI를 기반으로, **구급대원(Paramedic)** 을 위한 응급환자 **병원 분류(트리아지)·추천 백엔드**입니다.
 
@@ -51,6 +51,7 @@ ASR 기반 자동 KTAS 분류 단계에서 받은 **KTAS, 주증상, 위치 정�
 - **HTTP Client**: `requests`
 - **XML Parsing**: `xmltodict`
 - **Data Model**: Pydantic (BaseModel)
+- **Front Framework**: Vite + React + TypeScript
 
 ---
 

@@ -1221,4 +1221,48 @@ def ktas_from_audio(audio_source: Union[str, IO]) -> dict:
     }
 
 
+def ktas_from_text(raw_text: str) -> dict:
+    """
+    음성이 아닌 텍스트 보고서를 그대로 받아 KTAS를 산출하는 경량 파이프라인.
+    음성 파이프라인과 동일하게 LLM 보정 → SBAR 파싱 → decide_ktas_1to3를 거칩니다.
+    """
+    print(f"[INFO] 텍스트 기반 KTAS 분류 중...")
+    print("\n[입력 텍스트]\n" + raw_text)
+
+    # ① LLM 보정
+    clean_text = llm_clean_text(raw_text)
+    print("\n[LLM 보정 후 문장]\n" + clean_text)
+
+    # ② SBAR 파싱
+    sbar = parse_sbar_v3(clean_text)
+    print("\n[SBAR 결과]")
+    print(sbar)
+
+    # ③ KTAS 판단
+    level, reason = decide_ktas_1to3(sbar, clean_text)
+    print("\n===== 최종 KTAS =====")
+    print(f"KTAS = {level}")
+    print(reason)
+
+    ko_cc = CHIEF_COMPLAINT_KO.get(sbar["S"].get("chief_complaint"))
+    raw_hospital = sbar["S"].get("followup_raw")
+    final_hospital = best_match_hospital(raw_hospital, SEOUL_HOSPITAL_DB)
+
+    print("\n===== 추가 정보 =====")
+    print(f"주호소 : {ko_cc}")
+    print(f"원내/기존 다니던 병원 : {final_hospital or '정보 없음'}")
+    requirement = sbar["S"].get("requirement") or "None"
+    print(f"요구사항 : {requirement}")
+
+    return {
+        "text": clean_text,
+        "sbar": sbar,
+        "ktas": level,
+        "reason": reason,
+        "chief_complaint": sbar["S"]["chief_complaint"],
+        "followup_hospital_raw": raw_hospital,
+        "followup_hospital": final_hospital,
+    }
+
+
 

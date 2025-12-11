@@ -39,6 +39,7 @@ import {
   RoutingCandidateResponse,
   RoutingCandidateHospital,
   predictAudio,
+  predictText,
 } from '../utils/api';
 import { useRef } from 'react';
 
@@ -76,6 +77,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const [routingResponse, setRoutingResponse] = useState<RoutingCandidateResponse | null>(null);
   const [userLocation, setUserLocation] = useState<{ lat: number; lon: number } | null>(null);
   const [locationRequested, setLocationRequested] = useState(false);
+  const [awaitingLocation, setAwaitingLocation] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
   const recordTimeoutRef = useRef<number | null>(null);
@@ -91,6 +93,22 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     if (level === 2) return { bg: "bg-orange-50", border: "border-orange-200", text: "text-orange-700" };
     if (level === 3) return { bg: "bg-yellow-50", border: "border-yellow-200", text: "text-yellow-700" };
     return { bg: "bg-gray-50", border: "border-gray-200", text: "text-gray-700" };
+  }, []);
+
+  const mapSymptomToChiefComplaintCode = useCallback((symptomRaw: string | null | undefined) => {
+    const symptom = (symptomRaw || "").toLowerCase();
+    if (!symptom.trim()) return null;
+    if (symptom.includes("가슴") || symptom.includes("흉통") || symptom.includes("chest")) return "chest_pain";
+    if (symptom.includes("호흡") || symptom.includes("숨") || symptom.includes("resp")) return "dyspnea";
+    if (symptom.includes("신경") || symptom.includes("편마비") || symptom.includes("경련") || symptom.includes("stroke")) return "neuro";
+    if (symptom.includes("복통") || symptom.includes("소화") || symptom.includes("abdominal") || symptom.includes("배")) return "abdominal";
+    if (symptom.includes("출혈") || symptom.includes("bleed")) return "bleeding";
+    if (symptom.includes("의식") || symptom.includes("altered") || symptom.includes("syncope")) return "altered";
+    if (symptom.includes("외상") || symptom.includes("trauma") || symptom.includes("사고") || symptom.includes("골절") || symptom.includes("화상")) return "trauma";
+    if (symptom.includes("산부인") || symptom.includes("ob") || symptom.includes("preg")) return "obgyn";
+    if (symptom.includes("소아") || symptom.includes("pediatric") || symptom.includes("아이")) return "pediatric";
+    if (symptom.includes("정신") || symptom.includes("psy")) return "psychiatric";
+    return null;
   }, []);
 
   // KTAS Logic
@@ -133,8 +151,8 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     address: h.address,
   }), []);
 
-  // Fetch backend recommendations once list view opens
-  const fetchBackendHospitals = useCallback(async () => {
+  // Fetch backend recommendations (base)
+  const fetchBackendHospitals = useCallback(async (options?: { deferRender?: boolean }) => {
     if (!patientData.ktasLevel || !patientData.symptoms.trim()) {
       setHospitals([]);
       setRoutingResponse(null);
@@ -143,14 +161,17 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
     setIsLoadingHospitals(true);
     try {
+      const cc = mapSymptomToChiefComplaintCode(patientData.symptoms);
       const base = await routeFromKTAS({
         ktas_level: patientData.ktasLevel,
-        chief_complaint: patientData.symptoms,
+        chief_complaint: cc || patientData.symptoms,
         hospital_followup: patientData.existingHospital || undefined,
       });
 
       setRoutingResponse(base);
-      setHospitals(base.hospitals.slice(0, 3).map(mapToHospital));
+      if (!options?.deferRender) {
+        setHospitals(base.hospitals.slice(0, 3).map(mapToHospital));
+      }
     } catch (err) {
       console.error('Error fetching recommendations:', err);
       setHospitals([]);
@@ -158,11 +179,12 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     } finally {
       setIsLoadingHospitals(false);
     }
-  }, [mapToHospital, patientData.existingHospital, patientData.ktasLevel, patientData.symptoms]);
+  }, [mapSymptomToChiefComplaintCode, mapToHospital, patientData.existingHospital, patientData.ktasLevel, patientData.symptoms]);
 
   // Try to refine with geolocation once we already have base routing
   useEffect(() => {
     const refineWithLocation = async () => {
+      if (awaitingLocation) return;
       if (!userLocation || !routingResponse) return;
 
       const alreadyHasDistance = routingResponse.hospitals.some(
@@ -187,14 +209,14 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     };
 
     refineWithLocation();
-  }, [mapToHospital, routingResponse, userLocation]);
+  }, [awaitingLocation, mapToHospital, routingResponse, userLocation]);
 
   // Kick off base fetch when entering list view
   useEffect(() => {
-    if (view === 'list' && (!routingResponse || routingResponse.hospitals.length === 0)) {
+    if (view === 'list' && !awaitingLocation && (!routingResponse || routingResponse.hospitals.length === 0)) {
       fetchBackendHospitals();
     }
-  }, [fetchBackendHospitals, view]);
+  }, [awaitingLocation, fetchBackendHospitals, view]);
 
   // Sync hospitals when routingResponse is already available (e.g., from voice)
   useEffect(() => {
@@ -203,23 +225,52 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     }
   }, [routingResponse, mapToHospital]);
 
-  // Request geolocation when entering list view (best-effort)
+  // Request geolocation when entering list view (best-effort). If granted, wait for nearest before rendering.
   useEffect(() => {
     if (view !== 'list' || locationRequested) return;
-    if (!('geolocation' in navigator)) return;
+    if (!('geolocation' in navigator)) {
+      setLocationRequested(true);
+      return;
+    }
     setLocationRequested(true);
+    setAwaitingLocation(true);
+    setIsLoadingHospitals(true);
 
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
+      async (pos) => {
         setUserLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+        try {
+          // Base fetch without rendering
+          const base = await routeFromKTAS({
+            ktas_level: patientData.ktasLevel ?? 0,
+            chief_complaint: mapSymptomToChiefComplaintCode(patientData.symptoms) || patientData.symptoms,
+            hospital_followup: patientData.existingHospital || undefined,
+          });
+          setRoutingResponse(base);
+          // Nearest with location
+          const nearest = await routeNearest({
+            ...base,
+            user_lat: pos.coords.latitude,
+            user_lon: pos.coords.longitude,
+          });
+          setRoutingResponse(nearest);
+          setHospitals(nearest.hospitals.slice(0, 3).map(mapToHospital));
+        } catch (err) {
+          console.warn('Geolocation fetch failed, falling back to base list', err);
+          await fetchBackendHospitals();
+        } finally {
+          setIsLoadingHospitals(false);
+          setAwaitingLocation(false);
+        }
       },
-      (err) => {
+      async (err) => {
         console.warn('Geolocation error', err);
-        // 위치가 안 잡혀도 앱이 멈추지 않도록 그대로 진행
+        setAwaitingLocation(false);
+        await fetchBackendHospitals();
       },
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
     );
-  }, [locationRequested, view]);
+  }, [fetchBackendHospitals, mapSymptomToChiefComplaintCode, mapToHospital, patientData.existingHospital, patientData.ktasLevel, patientData.symptoms, view, locationRequested]);
 
 // Real-time Subscription for Transfer Request
   useEffect(() => {
@@ -264,6 +315,36 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     }
   };
 
+  const applyBackendResult = useCallback((result: RoutingCandidateResponse) => {
+    setRoutingResponse(result);
+    const vitals = result.stt_vitals || {};
+    const avpu = (vitals as any).avpu || (vitals as any).AVPU;
+    const rr = (vitals as any).rr ?? (vitals as any).RR;
+    const bpSys = (vitals as any).bp_sys ?? (vitals as any).BP_sys ?? (vitals as any).BP_SYS;
+    const bpDia = (vitals as any).bp_dia ?? (vitals as any).BP_dia ?? (vitals as any).BP_DIA;
+    const hr = (vitals as any).hr ?? (vitals as any).HR;
+    const bt = (vitals as any).bt ?? (vitals as any).BT;
+    setPatientData((prev) => ({
+      ...prev,
+      ktasLevel: result.case?.ktas ?? prev.ktasLevel,
+      symptoms: result.case?.complaint_label ?? prev.symptoms,
+      consciousness: avpu || prev.consciousness,
+      respiration: rr != null ? String(rr) : prev.respiration,
+      bloodPressure:
+        bpSys != null && bpDia != null
+          ? `${bpSys}/${bpDia}`
+          : prev.bloodPressure,
+      pulse: hr != null ? String(hr) : prev.pulse,
+      temperature: bt != null ? String(bt) : prev.temperature,
+    }));
+    if (result.case?.ktas != null) {
+      setKtasLocked(true);
+    }
+    if (result.hospitals?.length) {
+      setHospitals(result.hospitals.slice(0, 3).map(mapToHospital));
+    }
+  }, [mapToHospital]);
+
   const handleVoiceInput = async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
       alert("이 브라우저에서는 음성 녹음이 지원되지 않습니다.");
@@ -293,32 +374,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
           formData.append("audio", blob, "recording.webm");
 
           const result = await predictAudio(formData);
-          setRoutingResponse(result);
-
-          const vitals = result.stt_vitals || {};
-          const avpu = (vitals as any).avpu || (vitals as any).AVPU;
-          const rr = (vitals as any).rr ?? (vitals as any).RR;
-          const bpSys = (vitals as any).bp_sys ?? (vitals as any).BP_sys ?? (vitals as any).BP_SYS;
-          const bpDia = (vitals as any).bp_dia ?? (vitals as any).BP_dia ?? (vitals as any).BP_DIA;
-          const hr = (vitals as any).hr ?? (vitals as any).HR;
-          const bt = (vitals as any).bt ?? (vitals as any).BT;
-          setPatientData((prev) => ({
-            ...prev,
-            ktasLevel: result.case?.ktas ?? prev.ktasLevel,
-            symptoms: result.case?.complaint_label ?? prev.symptoms,
-            consciousness: avpu || prev.consciousness,
-            respiration: rr != null ? String(rr) : prev.respiration,
-            bloodPressure:
-              bpSys != null && bpDia != null
-                ? `${bpSys}/${bpDia}`
-                : prev.bloodPressure,
-            pulse: hr != null ? String(hr) : prev.pulse,
-            temperature: bt != null ? String(bt) : prev.temperature,
-          }));
-          if (result.case?.ktas != null) {
-            setKtasLocked(true);
-          }
-          setHospitals(result.hospitals.slice(0, 3).map(mapToHospital));
+          applyBackendResult(result);
           setView("review");
         } catch (err) {
           console.error("음성 전송 실패:", err);
@@ -410,6 +466,14 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const handleReset = () => {
     setView('input');
     setKtasLocked(false);
+    setRoutingResponse(null);
+    setHospitals([]);
+    setPatientInfo({
+      name: '',
+      birthdate: '',
+      age: '',
+      gender: '',
+    });
     setPatientData({
       consciousness: 'Alert',
       respiration: '',
@@ -522,13 +586,13 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
               {/* NEW: KTAS Live Status Display */}
               {/* Patient Basic Info */}
-              <div className="mb-6">
+              <div className="mt-6 mb-4">
                 <ModernCard className="space-y-4 border-2 border-gray-200">
                   <div className="flex items-center gap-2 text-sm font-bold text-gray-500 uppercase tracking-widest">
                     <Activity size={16} /> 환자 기본 정보
                   </div>
-                  <div className="space-y-3">
-                    <div className="space-y-1">
+                  <div className="space-y-6">
+                    <div className="space-y-3">
                       <p className="text-sm font-bold text-gray-500">환자 이름</p>
                       <ModernInput
                         value={patientInfo.name}
@@ -537,7 +601,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                         className="text-lg font-semibold"
                       />
                     </div>
-                    <div className="space-y-1">
+                    <div className="space-y-3">
                       <p className="text-sm font-bold text-gray-500">생년월일</p>
                       <ModernInput
                         value={patientInfo.birthdate}
@@ -546,7 +610,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                         className="text-lg font-semibold"
                       />
                     </div>
-                    <div className="space-y-1">
+                    <div className="space-y-3">
                       <p className="text-sm font-bold text-gray-500">나이</p>
                       <ModernInput
                         value={patientInfo.age}
@@ -555,7 +619,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                         className="text-lg font-semibold"
                       />
                     </div>
-                    <div className="space-y-1">
+                    <div className="space-y-3">
                       <p className="text-sm font-bold text-gray-500">성별</p>
                       <ModernSelect
                         value={patientInfo.gender}
@@ -704,16 +768,30 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
               {/* Bottom Action */}
               <div className="fixed bottom-0 left-0 right-0 p-5 bg-white border-t border-gray-100 safe-area-bottom shadow-[0_-4px_20px_rgba(0,0,0,0.05)] z-10">
                  <div className="max-w-md mx-auto flex items-center gap-4">
-                    {patientData.ktasLevel && (
-                        <div className={cn(
-                            "px-5 py-3 rounded-2xl font-black text-center min-w-[100px] shadow-lg border-2",
-                            patientData.ktasLevel <= 2 ? "bg-red-600 text-white border-red-700" : "bg-yellow-400 text-black border-yellow-500"
-                        )}>
-                            <div className="text-xs uppercase opacity-90 tracking-widest mb-1">KTAS</div>
-                            <div className="text-4xl leading-none">{patientData.ktasLevel}</div>
-                        </div>
-                    )}
-                    <ModernButton onClick={() => setView('review')} className="flex-1 shadow-lg shadow-teal-200 h-16 text-2xl" size="lg">
+                    <ModernButton
+                      onClick={async () => {
+                        // 텍스트 입력 기반으로 백엔드 KTAS/바이탈도 받아오기
+                        if (patientData.symptoms.trim().length === 0) {
+                          setView('review');
+                          return;
+                        }
+                        try {
+                          setIsProcessingVoice(true);
+                          const genderText = patientInfo.gender === 'M' ? '남성' : patientInfo.gender === 'F' ? '여성' : '';
+                          const report = `환자 보고: ${patientInfo.age || ''}세 ${genderText} 환자. 이름: ${patientInfo.name || '정보 없음'}. 생년월일: ${patientInfo.birthdate || '정보 없음'}. 주증상: ${patientData.symptoms}. 의식: ${patientData.consciousness}. 호흡수: ${patientData.respiration || '정보 없음'}. 맥박: ${patientData.pulse || '정보 없음'}. 혈압: ${patientData.bloodPressure || '정보 없음'}. 체온: ${patientData.temperature || '정보 없음'}. 평소 병원: ${patientData.existingHospital || '정보 없음'}.`;
+                          const result = await predictText(report);
+                          applyBackendResult(result);
+                        } catch (err) {
+                          console.error("텍스트 기반 KTAS 호출 실패:", err);
+                          alert("텍스트로 KTAS 계산에 실패했습니다. 다시 시도해 주세요.");
+                        } finally {
+                          setIsProcessingVoice(false);
+                          setView('review');
+                        }
+                      }}
+                      className="flex-1 shadow-lg shadow-teal-200 h-16 text-2xl"
+                      size="lg"
+                    >
                         KTAS 확인 후 추천
                     </ModernButton>
                  </div>
@@ -857,28 +935,39 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                             "border-orange-200 bg-orange-50/50"
                         )}
                     >
-                        {/* Rank Badge */}
-                        <div className={cn(
-                            "absolute top-0 right-0 px-4 py-2 rounded-bl-2xl font-black text-sm z-10 flex items-center gap-1",
-                            idx === 0 ? "bg-yellow-400 text-yellow-900" :
-                            idx === 1 ? "bg-slate-400 text-white" :
-                            "bg-orange-300 text-orange-900"
-                        )}>
-                            {idx === 0 && <Trophy size={14} />}
-                            {idx === 1 && <Medal size={14} />}
-                            {idx === 2 && <Medal size={14} />}
-                            {idx === 0 ? "1순위" : `${idx + 1}순위`}
-                        </div>
-                        
-                        <div className="flex justify-between items-start mb-4 pr-16">
-                            <div>
-                                <h3 className="text-2xl font-black text-gray-900 mb-1 leading-tight">{hospital.name}</h3>
-                                <div className="flex items-center gap-2 text-sm text-gray-600 font-bold">
-                                    <span className="px-2 py-0.5 bg-white border border-gray-200 rounded text-xs text-gray-500">{hospital.specialties?.[0]}</span>
-                                    <span>|</span>
-                                    <span>커버리지 {hospital.acceptanceRate ?? '--'}%</span>
-                                </div>
-                            </div>
+                        <div className="flex justify-between items-start gap-3 mb-4">
+                          <div className="flex-1 min-w-0">
+                              <h3 className="text-2xl font-black text-gray-900 mb-2 leading-tight break-words">
+                                {hospital.name}
+                              </h3>
+                              <div className="flex flex-wrap gap-2 text-sm text-gray-600 font-bold">
+                                {hospital.specialties?.map((sp, i) => (
+                                  <span
+                                    key={`${hospital.id}-sp-${i}`}
+                                    className="px-2 py-0.5 bg-white border border-gray-200 rounded-xl text-[10px] leading-tight text-gray-700 shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
+                                  >
+                                    {sp}
+                                  </span>
+                                ))}
+                              </div>
+                          </div>
+
+                          <div className="flex flex-col items-end gap-2 shrink-0">
+                              <div className={cn(
+                                  "px-4 py-2 rounded-2xl font-black text-sm flex items-center gap-1 shadow-sm",
+                                  idx === 0 ? "bg-yellow-400 text-yellow-900" :
+                                  idx === 1 ? "bg-slate-400 text-white" :
+                                  "bg-orange-300 text-orange-900"
+                              )}>
+                                  {idx === 0 && <Trophy size={14} />}
+                                  {idx === 1 && <Medal size={14} />}
+                                  {idx === 2 && <Medal size={14} />}
+                                  {idx === 0 ? "1순위" : `${idx + 1}순위`}
+                              </div>
+                              <div className="px-3 py-1 rounded-full bg-white border border-gray-200 text-[10px] font-bold text-gray-700 shadow-sm">
+                                커버리지 {hospital.acceptanceRate ?? '--'}%
+                              </div>
+                          </div>
                         </div>
 
                         <div className="grid grid-cols-3 gap-2 mb-5">

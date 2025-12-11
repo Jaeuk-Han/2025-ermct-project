@@ -4,7 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Set, Optional, Tuple
 from fastapi import UploadFile, File # UploadFile, File 추가
 # 뒤에 ', get_whisper_model' 을 꼭 붙여야 합니다!
-from app.ktas_engine import ktas_from_audio, build_stage2_payload, get_whisper_model
+from app.ktas_engine import ktas_from_audio, ktas_from_text, build_stage2_payload, get_whisper_model
+from pydantic import BaseModel
 
 from app.state_assignments import pending_assignments
 
@@ -47,6 +48,10 @@ from app.complaint_mapping import (
     complaint_id_from_chief_complaint,
     COMPLAINT_LABELS,
 )
+
+
+class TextKTASRequest(BaseModel):
+    text: str
 
 # 3단계 import
 from .distance_logic import calculate_all_distances_async, get_top3
@@ -1487,4 +1492,25 @@ async def predict_audio(audio: UploadFile = File(...)):
     result_dict = final_response.model_dump()
     stt_vitals = stage1_result.get("sbar", {}).get("A", {}) if isinstance(stage1_result, dict) else {}
     result_dict["stt_vitals"] = stt_vitals
+    return RoutingCandidateResponse(**result_dict)
+
+
+@app.post("/api/ktas/predict-text", response_model=RoutingCandidateResponse)
+async def predict_text(req: TextKTASRequest = Body(...)):
+    """
+    음성 대신 텍스트 보고서를 받아 KTAS를 산출하고 병원 추천을 반환.
+    음성 파이프라인과 동일한 decide_ktas_1to3 로직을 사용.
+    """
+    print("\n[Stage 1] 텍스트 분석 및 KTAS 분류 중...")
+    stage1_result = ktas_from_text(req.text)
+
+    payload_dict = build_stage2_payload(stage1_result)
+    req_obj = KTASRoutingRequest(**payload_dict)
+
+    print("[Stage 2] 병원 필터링 및 순위 선정 중...")
+    final_response = route_from_ktas_seoul(req_obj)
+
+    result_dict = final_response.model_dump()
+    text_vitals = stage1_result.get("sbar", {}).get("A", {}) if isinstance(stage1_result, dict) else {}
+    result_dict["stt_vitals"] = text_vitals  # 프론트 재사용을 위해 동일 키
     return RoutingCandidateResponse(**result_dict)
