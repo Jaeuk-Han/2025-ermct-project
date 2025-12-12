@@ -20,7 +20,8 @@ import {
   Clock,
   Trophy,
   Medal,
-  X
+  X,
+  ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -78,6 +79,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const [userLocation, setUserLocation] = useState<{ lat: number; lon: number } | null>(null);
   const [locationRequested, setLocationRequested] = useState(false);
   const [awaitingLocation, setAwaitingLocation] = useState(false);
+  const [openHospitalId, setOpenHospitalId] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
   const recordTimeoutRef = useRef<number | null>(null);
@@ -940,15 +942,20 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                               <h3 className="text-2xl font-black text-gray-900 mb-2 leading-tight break-words">
                                 {hospital.name}
                               </h3>
-                              <div className="flex flex-wrap gap-2 text-sm text-gray-600 font-bold">
-                                {hospital.specialties?.map((sp, i) => (
-                                  <span
-                                    key={`${hospital.id}-sp-${i}`}
-                                    className="px-2 py-0.5 bg-white border border-gray-200 rounded-xl text-[10px] leading-tight text-gray-700 shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
-                                  >
-                                    {sp}
+                              <div className="flex flex-col gap-1">
+                                {hospital.address && (
+                                  <span className="px-2 py-0.5 rounded-full bg-white border border-gray-200 text-[10px] text-gray-600 truncate max-w-[220px]">
+                                    {hospital.address}
                                   </span>
-                                ))}
+                                )}
+                                <span className={cn(
+                                  "px-2 py-0.5 rounded-full text-[10px] border self-start",
+                                  hospital.phoneNumber
+                                    ? "bg-white text-emerald-700 border-emerald-200"
+                                    : "bg-gray-100 text-gray-500 border-gray-200"
+                                )}>
+                                  {hospital.phoneNumber ? `☎ ${hospital.phoneNumber}` : '전화 정보 없음'}
+                                </span>
                               </div>
                           </div>
 
@@ -967,10 +974,26 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                               <div className="px-3 py-1 rounded-full bg-white border border-gray-200 text-[10px] font-bold text-gray-700 shadow-sm">
                                 커버리지 {hospital.acceptanceRate ?? '--'}%
                               </div>
+                              <button
+                                className="flex items-center gap-1 text-xs font-bold text-[#00796B] hover:text-[#005f56]"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenHospitalId((prev) => prev === hospital.id ? null : hospital.id);
+                                }}
+                              >
+                                상세 보기
+                                <ChevronDown
+                                  size={14}
+                                  className={cn(
+                                    "transition-transform",
+                                    openHospitalId === hospital.id ? "rotate-180" : ""
+                                  )}
+                                />
+                              </button>
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-2 mb-5">
+                        <div className="grid grid-cols-3 gap-3 mb-5">
                             <div className="bg-white/80 p-2 rounded-xl text-center border border-gray-100 shadow-sm">
                                 <p className="text-[10px] text-gray-500 font-bold uppercase mb-0.5">가용 병상</p>
                                 <p className="text-xl font-black text-[#388E3C]">{hospital.availableBeds}</p>
@@ -985,7 +1008,31 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                             </div>
                         </div>
 
-                        <div className="flex items-center gap-3">
+                        {openHospitalId === hospital.id && (
+                          <div className="mt-3 mb-4 space-y-4 bg-white/90 rounded-2xl border border-gray-100 p-4 shadow-sm">
+                            <div className="space-y-2">
+                              <p className="text-[11px] text-gray-500 font-bold tracking-tight">추천 사유</p>
+                              <div className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 whitespace-pre-wrap text-sm text-gray-800 leading-relaxed">
+                                {hospital.reasonSummary || '정보 없음'}
+                              </div>
+                            </div>
+                            <div className="space-y-2">
+                              <p className="text-[11px] text-gray-500 font-bold tracking-tight">지원 주증상</p>
+                              <div className="flex flex-wrap gap-2">
+                                {(hospital.specialties || []).map((sp, i) => (
+                                  <span
+                                    key={`${hospital.id}-support-${i}`}
+                                    className="px-2 py-0.5 bg-gray-50 border border-gray-200 rounded-xl text-[10px] text-gray-700"
+                                  >
+                                    {sp}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-3 border-t border-gray-200 pt-4 mt-2">
                             {/* Call Button - Icon Only, Distinct Color */}
                             <button 
                                 className={cn(

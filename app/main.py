@@ -603,12 +603,16 @@ def get_hospital_summaries_by_region(
         # (2) 중증 정보: 미리 만든 매핑에서 가져오기
         serious = serious_by_hpid.get(hpid)
 
-        # (3) 응급실/중증 메시지
-        messages = ermct_client.get_emergency_messages(
-            hpid=hpid,
-            num_rows=50,
-            page_no=1,
-        )
+        # (3) 응급실/중증 메시지 (외부 API 5xx 등은 무시하고 계속 진행)
+        try:
+            messages = ermct_client.get_emergency_messages(
+                hpid=hpid,
+                num_rows=50,
+                page_no=1,
+            )
+        except Exception as e:
+            print(f"[WARN] get_emergency_messages failed for {hpid}: {e}")
+            messages = []
 
         # (4) 이름 결정 (basic → realtime → messages 순)
         name: Optional[str] = None
