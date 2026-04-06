@@ -172,12 +172,25 @@ def procedure_status_for_hospital(
     else:
         proc_avail = compute_procedure_availability(summary)
 
+    debug_hpid = summary.id in {"A2116806", "A2100016"}
+
     for group_id in required_groups:
         cfg = PROCEDURE_GROUPS.get(group_id)
         if not cfg:
             continue
 
         avail = proc_avail.get(group_id)
+        if debug_hpid:
+            print(
+                "[PROC DEBUG] "
+                f"hpid={summary.id} group={group_id} "
+                f"avail_status={getattr(avail, 'status', None)!r} "
+                f"source={getattr(avail, 'source', None)!r} "
+                f"bed_types={cfg['bed_types']} "
+                f"realtime_er={getattr(summary.realtime, 'er_beds', None)!r} "
+                f"realtime_or={getattr(summary.realtime, 'or_beds', None)!r} "
+                f"realtime_icu={getattr(summary.realtime, 'general_icu_beds', None)!r}"
+            )
         # 아예 정보가 없거나, status가 "가능"이 아니면 병상은 0 처리
         if not avail or avail.status != "가능":
             result[group_id] = {"api_beds": 0, "effective_beds": 0}
@@ -193,6 +206,13 @@ def procedure_status_for_hospital(
             summary.realtime,
             cfg["bed_types"],
         )
+
+        if debug_hpid:
+            print(
+                "[PROC DEBUG] "
+                f"hpid={summary.id} group={group_id} "
+                f"api_beds={api_beds} effective_beds={eff_beds}"
+            )
 
         result[group_id] = {
             "api_beds": api_beds,

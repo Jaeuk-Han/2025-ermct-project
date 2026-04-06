@@ -28,15 +28,27 @@ async def get_tmap_distance_async(start_lat, start_lon, end_lat, end_lon):
         "searchOption": "0"
     }
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=body, headers=headers)
-        data = response.json()
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        try:
+            response = await client.post(url, json=body, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as exc:
+            print(
+                "[TMAP] request failed "
+                f"start=({start_lat},{start_lon}) end=({end_lat},{end_lon}) error={exc}"
+            )
+            return None, None
 
         try:
             distance = data["features"][0]["properties"]["totalDistance"]
             duration = data["features"][0]["properties"]["totalTime"]
             return distance, duration
-        except:
+        except Exception:
+            print(
+                "[TMAP] unexpected response "
+                f"start=({start_lat},{start_lon}) end=({end_lat},{end_lon}) data={data}"
+            )
             return None, None
 
 # 거리 계산 (JSON 병원 리스트 입력)
@@ -62,6 +74,10 @@ async def calculate_all_distances_async(user_lat, user_lon, hospitals):
             "reason_summary": h.get("reason_summary", "정보 없음")
         })
 
+    print(
+        "[TMAP] distance results "
+        f"requested={len(hospitals)} resolved={len(results)}"
+    )
     return results
 
 # TOP3 반환

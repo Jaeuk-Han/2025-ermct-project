@@ -27,6 +27,31 @@ interface UserSession {
   id: string;
 }
 
+const demoAuthEnabled =
+  typeof import.meta !== 'undefined' &&
+  Boolean((import.meta as any).env?.VITE_DEMO_AUTH);
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      window.setTimeout(() => reject(new Error(`${label} timeout`)), ms);
+    }),
+  ]);
+}
+
+function getReadableAuthError(error: unknown): string {
+  if (error instanceof TypeError && error.message === 'Failed to fetch') {
+    return 'Supabase auth server could not be reached. Check internet access, firewall or VPN, ad blocker, and whether the Supabase project is active.';
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return 'Unknown authentication error';
+}
+
 export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [user, setUser] = useState<UserSession | null>(null);
@@ -41,26 +66,52 @@ export default function App() {
 
   // 1. Check for existing Supabase session on mount
   useEffect(() => {
-    const checkSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (session?.user) {
-        // Fetch profile to get role
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('role, name')
-          .eq('id', session.user.id)
-          .single();
-          
-        if (profile) {
-          setUser({
-            id: session.user.id,
-            role: profile.role as UserRole,
-            name: profile.name || session.user.email?.split('@')[0] || 'User'
-          });
+    if (demoAuthEnabled) {
+      const saved = localStorage.getItem('ems_demo_session');
+      if (saved) {
+        try {
+          setUser(JSON.parse(saved));
+        } catch (error) {
+          console.warn('Failed to parse demo session:', error);
+          localStorage.removeItem('ems_demo_session');
         }
       }
       setIsLoading(false);
+      return;
+    }
+
+    let isMounted = true;
+
+    const checkSession = async () => {
+      try {
+        const { data: { session } } = await withTimeout(
+          supabase.auth.getSession(),
+          4000,
+          'Supabase session',
+        );
+
+        if (session?.user) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('role, name')
+            .eq('id', session.user.id)
+            .single();
+
+          if (profile && isMounted) {
+            setUser({
+              id: session.user.id,
+              role: profile.role as UserRole,
+              name: profile.name || session.user.email?.split('@')[0] || 'User'
+            });
+          }
+        }
+      } catch (error) {
+        console.warn('Initial session check failed:', error);
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
     };
 
     checkSession();
@@ -73,7 +124,10 @@ export default function App() {
       // Note: We handle the 'SIGNED_IN' logic primarily in the submit handler to ensure profile fetching
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   const handleLoginStart = (role: UserRole) => {
@@ -91,12 +145,28 @@ export default function App() {
     setIsLoggingIn(true);
     
     try {
+      if (demoAuthEnabled) {
+        const demoUser: UserSession = {
+          id: `demo-${selectedRoleForLogin}-${Date.now()}`,
+          role: selectedRoleForLogin,
+          name: loginId.split('@')[0] || 'demo-user',
+        };
+        localStorage.setItem('ems_demo_session', JSON.stringify(demoUser));
+        setUser(demoUser);
+        setShowLoginModal(false);
+        return;
+      }
+
       if (isSignUp) {
         // 1. Sign Up
-        const { data: authData, error: authError } = await supabase.auth.signUp({
-          email: loginId,
-          password: loginPwd,
-        });
+        const { data: authData, error: authError } = await withTimeout(
+          supabase.auth.signUp({
+            email: loginId,
+            password: loginPwd,
+          }),
+          8000,
+          'Sign up',
+        );
 
         if (authError) throw authError;
 
@@ -128,10 +198,14 @@ export default function App() {
         }
       } else {
         // Login
-        const { data, error } = await supabase.auth.signInWithPassword({
-          email: loginId,
-          password: loginPwd,
-        });
+        const { data, error } = await withTimeout(
+          supabase.auth.signInWithPassword({
+            email: loginId,
+            password: loginPwd,
+          }),
+          8000,
+          'Sign in',
+        );
 
         if (error) throw error;
 
@@ -170,13 +244,19 @@ export default function App() {
       }
     } catch (error: any) {
       console.error("Auth error:", error);
-      alert(`로그인/회원가입 실패: ${error.message}`);
+      alert(`로그인/회원가입 실패: ${getReadableAuthError(error)}`);
     } finally {
       setIsLoggingIn(false);
     }
   };
 
   const handleLogout = async () => {
+    if (demoAuthEnabled) {
+      localStorage.removeItem('ems_demo_session');
+      setUser(null);
+      return;
+    }
+
     await supabase.auth.signOut();
     setUser(null);
     localStorage.removeItem('ems_app_session'); // Clean up old legacy session if any

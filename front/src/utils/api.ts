@@ -78,6 +78,11 @@ export interface KtasRoutePayload {
   ktas_level: number;
   chief_complaint: string;
   hospital_followup?: string | null;
+  current_sigungu_code?: string | null;
+  current_sigungu_name?: string | null;
+  user_lat?: number | null;
+  user_lon?: number | null;
+  min_valid_hospitals?: number;
 }
 
 export interface NearestRoutingRequest extends RoutingCandidateResponse {

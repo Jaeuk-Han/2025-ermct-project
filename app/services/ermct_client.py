@@ -235,7 +235,14 @@ class ErmctClient:
             },
         )
 
-        items = body.get("items", {}).get("item")
+        if not isinstance(body, dict):
+            return None
+
+        items_container = body.get("items")
+        if not isinstance(items_container, dict):
+            return None
+
+        items = items_container.get("item")
         if not items:
             return None
 

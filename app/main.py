@@ -1,7 +1,10 @@
 # app/main.py
+import os
+
 from fastapi import FastAPI, Query, Response, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, List, Set, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Set, Optional, Sequence, Tuple
 from fastapi import UploadFile, File # UploadFile, File 추가
 # 뒤에 ', get_whisper_model' 을 꼭 붙여야 합니다!
 from app.ktas_engine import ktas_from_audio, ktas_from_text, build_stage2_payload, get_whisper_model
@@ -10,6 +13,15 @@ from pydantic import BaseModel
 from app.state_assignments import pending_assignments
 
 from .services.ermct_client import ErmctClient
+from .services.sigungu_search import (
+    ExpansionPolicy,
+    ProgressiveSearchResult,
+    SigunguAdjacencyIndex,
+    build_expansion_levels,
+    load_sigungu_adjacency,
+    search_regions_progressively,
+)
+from .services.region_resolver import KakaoRegionResolver
 
 from app.schemas import (
     HospitalRealtime,
@@ -68,6 +80,53 @@ SEOUL_SIGUNGU_LIST = [
     "용산구", "은평구", "종로구", "중구", "중랑구",
 ]
 
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+SIGUNGU_ADJACENCY_PATH = DATA_DIR / "sigungu_adjacency.json"
+DEFAULT_EXPANSION_POLICY = ExpansionPolicy(top_touching_limit=3)
+sigungu_adjacency_index: Optional[SigunguAdjacencyIndex] = None
+kakao_region_resolver = KakaoRegionResolver()
+
+SIDO_CODE_TO_NAME: Dict[str, str] = {
+    "11": "서울특별시",
+    "26": "부산광역시",
+    "27": "대구광역시",
+    "28": "인천광역시",
+    "29": "광주광역시",
+    "30": "대전광역시",
+    "31": "울산광역시",
+    "36": "세종특별자치시",
+    "41": "경기도",
+    "42": "강원특별자치도",
+    "43": "충청북도",
+    "44": "충청남도",
+    "45": "전북특별자치도",
+    "46": "전라남도",
+    "47": "경상북도",
+    "48": "경상남도",
+    "50": "제주특별자치도",
+}
+
+SIDO_CODE_TO_NAME = {
+    "11": "서울특별시",
+    "21": "부산광역시",
+    "22": "대구광역시",
+    "23": "인천광역시",
+    "24": "광주광역시",
+    "25": "대전광역시",
+    "26": "울산광역시",
+    "29": "세종특별자치시",
+    "31": "경기도",
+    "32": "강원특별자치도",
+    "33": "충청북도",
+    "34": "충청남도",
+    "35": "전북특별자치도",
+    "36": "전라남도",
+    "37": "경상북도",
+    "38": "경상남도",
+    "39": "제주특별자치도",
+}
+
+
 def _get_all_seoul_summaries(sm_type: int = 1) -> List[HospitalSummary]:
     """
     서울특별시 전체 25개 구에 대해
@@ -89,6 +148,66 @@ def _get_all_seoul_summaries(sm_type: int = 1) -> List[HospitalSummary]:
                 continue
             seen.add(s.id)
             all_summaries.append(s)
+
+    return all_summaries
+
+
+def _get_all_indexed_summaries(sm_type: int = 1) -> List[HospitalSummary]:
+    adjacency = _get_sigungu_adjacency_index()
+
+    all_summaries: List[HospitalSummary] = []
+    seen: Set[str] = set()
+    failure_count = 0
+    throttled_count = 0
+    failure_samples: List[str] = []
+    max_failure_samples = 5
+    throttle_abort_limit = 5
+
+    for sigungu_code in adjacency.all_codes:
+        sigungu_name = adjacency.get_name(sigungu_code)
+        sido_code = adjacency.get_sido_code(sigungu_code)
+        sido_name = SIDO_CODE_TO_NAME.get(sido_code) if sido_code else None
+        if not sigungu_name or not sido_name:
+            continue
+
+        try:
+            region_sums = get_hospital_summaries_by_region(
+                sido=sido_name,
+                sigungu=sigungu_name,
+                sm_type=sm_type,
+                num_rows=200,
+            )
+        except Exception as exc:
+            failure_count += 1
+            error_text = str(exc)
+            if "429" in error_text:
+                throttled_count += 1
+
+            if len(failure_samples) < max_failure_samples:
+                failure_samples.append(
+                    f"{sido_name} {sigungu_name}: {error_text}"
+                )
+
+            if throttled_count >= throttle_abort_limit:
+                print(
+                    "[GLOBAL FALLBACK] aborted due to rate limit "
+                    f"after {throttled_count} throttled regions"
+                )
+                break
+            continue
+
+        for summary in region_sums:
+            if not summary.id or summary.id in seen:
+                continue
+            seen.add(summary.id)
+            all_summaries.append(summary)
+
+    if failure_count:
+        print(
+            "[GLOBAL FALLBACK] failures "
+            f"count={failure_count} throttled={throttled_count} "
+            f"samples={failure_samples}"
+        )
 
     return all_summaries
 
@@ -127,6 +246,328 @@ def _resolve_home_hpid_from_followup(
             return s.id
 
     return None
+
+
+def _resolve_current_sigungu_code(req: KTASRoutingRequest) -> Optional[str]:
+    adjacency = _get_sigungu_adjacency_index()
+
+    if req.current_sigungu_code:
+        return req.current_sigungu_code.strip()
+
+    if req.current_sigungu_name:
+        resolved = adjacency.get_code(req.current_sigungu_name)
+        if resolved:
+            return resolved
+
+        normalized = req.current_sigungu_name.strip().replace(" ", "")
+        for code, name in adjacency.code_to_name.items():
+            compact_name = name.replace(" ", "")
+            if normalized in compact_name or compact_name in normalized:
+                return code
+
+    return None
+
+
+def _resolve_current_region(req: KTASRoutingRequest) -> Tuple[Optional[str], Optional[str]]:
+    adjacency = _get_sigungu_adjacency_index()
+
+    current_sigungu_code = _resolve_current_sigungu_code(req)
+    if current_sigungu_code:
+        sido_code = adjacency.get_sido_code(current_sigungu_code)
+        if sido_code:
+            return current_sigungu_code, SIDO_CODE_TO_NAME.get(sido_code)
+
+    if req.user_lat is not None and req.user_lon is not None:
+        try:
+            resolved = kakao_region_resolver.resolve_sigungu(req.user_lat, req.user_lon)
+        except Exception as exc:
+            print(f"[REGION RESOLVER] Kakao resolver failed: {exc}")
+            return current_sigungu_code, None
+
+        if not resolved:
+            return current_sigungu_code, None
+
+        code = current_sigungu_code
+        if not code:
+            direct = adjacency.get_code(resolved.sigungu_name)
+            if direct:
+                code = direct
+            else:
+                normalized = resolved.sigungu_name.strip().replace(" ", "")
+                for candidate_code, name in adjacency.code_to_name.items():
+                    compact_name = name.replace(" ", "")
+                    if normalized in compact_name or compact_name in normalized:
+                        code = candidate_code
+                        break
+
+        sido_name = resolved.sido_name
+        if not sido_name and code:
+            sido_code = adjacency.get_sido_code(code)
+            if sido_code:
+                sido_name = SIDO_CODE_TO_NAME.get(sido_code)
+
+        return code, sido_name
+
+    return current_sigungu_code, None
+
+
+def _build_routing_candidates_from_summaries(
+    req: KTASRoutingRequest,
+    complaint_id: int,
+    required_groups: List[str],
+    complaint_label: str,
+    summaries: List[HospitalSummary],
+) -> List[RoutingCandidateHospital]:
+    home_hpid = _resolve_home_hpid_from_followup(
+        summaries=summaries,
+        hospital_followup=req.hospital_followup,
+    )
+
+    candidates: List[RoutingCandidateHospital] = []
+    debug_enabled = os.getenv("ROUTING_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+
+    for s in summaries:
+        basic = s.basic
+        if not basic:
+            if debug_enabled:
+                print(f"[CANDIDATE DROP] hpid={s.id} reason=no_basic")
+            continue
+
+        lat = basic.latitude
+        lon = basic.longitude
+        if lat is None or lon is None:
+            if debug_enabled:
+                print(f"[CANDIDATE DROP] hpid={s.id} name={s.name or basic.name or s.id} reason=no_latlon")
+            continue
+
+        duty_eryn = basic.raw_fields.get("dutyEryn") if basic.raw_fields else None
+        if duty_eryn != "1":
+            if debug_enabled:
+                print(
+                    f"[CANDIDATE DROP] hpid={s.id} name={s.name or basic.name or s.id} "
+                    f"reason=dutyEryn value={duty_eryn!r}"
+                )
+            continue
+
+        proc_status = procedure_status_for_hospital(s, required_groups)
+        if not proc_status:
+            if debug_enabled:
+                print(
+                    f"[CANDIDATE DROP] hpid={s.id} name={s.name or basic.name or s.id} "
+                    f"reason=no_proc_status required_groups={required_groups}"
+                )
+            continue
+
+        groups_with_beds = [
+            gid
+            for gid, info in proc_status.items()
+            if info.get("effective_beds", 0) > 0
+        ]
+        if not groups_with_beds:
+            if debug_enabled:
+                status_bits = {
+                    gid: {
+                        "api_beds": info.get("api_beds", 0),
+                        "effective_beds": info.get("effective_beds", 0),
+                    }
+                    for gid, info in proc_status.items()
+                }
+                print(
+                    f"[CANDIDATE DROP] hpid={s.id} name={s.name or basic.name or s.id} "
+                    f"reason=no_groups_with_beds proc_status={status_bits}"
+                )
+            continue
+
+        if s.realtime:
+            _, total_eff, _ = get_effective_beds_for_groups(
+                hpid=s.id,
+                realtime=s.realtime,
+                group_ids=groups_with_beds,
+            )
+        else:
+            total_eff = 0
+
+        if total_eff <= 0:
+            if debug_enabled:
+                print(
+                    f"[CANDIDATE DROP] hpid={s.id} name={s.name or basic.name or s.id} "
+                    f"reason=total_eff_le_zero groups_with_beds={groups_with_beds} total_eff={total_eff}"
+                )
+            continue
+
+        coverage_score, coverage_level = _compute_coverage_score_and_level(
+            required_groups=required_groups,
+            groups_with_beds=groups_with_beds,
+        )
+        groups_with_beds_labels = humanize_procedure_groups(groups_with_beds)
+
+        supported_complaints = sorted(list(complaints_supported_by_hospital(s)))
+        supported_labels = [
+            COMPLAINT_LABELS[cid]
+            for cid in supported_complaints
+            if cid in COMPLAINT_LABELS
+        ]
+
+        mkiosk_flags: List[str] = []
+        if s.serious and s.serious.mkiosk:
+            mkiosk_flags.extend(
+                [
+                    k
+                    for k, v in s.serious.mkiosk.items()
+                    if v and str(v).upper().startswith("Y")
+                ]
+            )
+        if basic.raw_fields:
+            for k, v in basic.raw_fields.items():
+                if not k.startswith("MKioskTy"):
+                    continue
+                if v and str(v).upper().startswith("Y") and k not in mkiosk_flags:
+                    mkiosk_flags.append(k)
+
+        is_home = bool(home_hpid and s.id == home_hpid)
+        base_score = float(total_eff + (100 if is_home else 0))
+        priority_score = _apply_coverage_weight(
+            base_score=base_score,
+            coverage_level=coverage_level,
+            coverage_score=coverage_score,
+        )
+
+        reason = _build_reason_summary_with_coverage(
+            ktas=req.ktas_level,
+            complaint_label=complaint_label,
+            groups_with_beds_labels=groups_with_beds_labels,
+            groups_with_beds=groups_with_beds,
+            total_eff=total_eff,
+            coverage_level=coverage_level,
+            coverage_score=coverage_score,
+        )
+
+        candidates.append(
+            RoutingCandidateHospital(
+                id=s.id,
+                name=s.name or basic.name or s.id,
+                address=basic.address or "",
+                phone=basic.phone,
+                emergency_phone=basic.emergency_phone,
+                latitude=lat,
+                longitude=lon,
+                procedure_beds=proc_status,
+                total_effective_beds=total_eff,
+                has_any_bed=True,
+                groups_with_beds=groups_with_beds,
+                groups_with_beds_labels=groups_with_beds_labels,
+                supported_complaints=supported_complaints,
+                supported_complaint_labels=supported_labels,
+                mkiosk_flags=sorted(mkiosk_flags),
+                coverage_score=coverage_score,
+                coverage_level=coverage_level,
+                priority_score=priority_score,
+                reason_summary=reason,
+            )
+        )
+
+    candidates.sort(key=lambda c: (-c.priority_score, -c.total_effective_beds))
+    return candidates
+
+
+def _build_stage1_response(stage1_result: dict) -> RoutingCandidateResponse:
+    payload_dict = build_stage2_payload(stage1_result)
+    chief_complaint = payload_dict.get("chief_complaint", "unknown")
+    complaint_id = complaint_id_from_chief_complaint(chief_complaint)
+    if not complaint_id:
+        complaint_id = 0
+        complaint_label = chief_complaint
+        required_groups: List[str] = []
+        required_group_labels: List[str] = []
+    else:
+        complaint_label = COMPLAINT_LABELS.get(complaint_id, chief_complaint)
+        required_groups = required_procedure_groups_for_complaint(complaint_id)
+        required_group_labels = humanize_procedure_groups(required_groups)
+
+    routing_case = RoutingCase(
+        ktas=payload_dict.get("ktas_level", 0),
+        complaint_id=complaint_id,
+        complaint_label=complaint_label,
+        required_procedure_groups=required_groups,
+        required_procedure_group_labels=required_group_labels,
+    )
+
+    stt_vitals = (
+        stage1_result.get("sbar", {}).get("A", {})
+        if isinstance(stage1_result, dict)
+        else {}
+    )
+
+    return RoutingCandidateResponse(
+        followup_id=None,
+        case=routing_case,
+        hospitals=[],
+        stt_vitals=stt_vitals,
+    )
+
+
+def _search_routing_candidates_progressively(
+    req: KTASRoutingRequest,
+    complaint_id: int,
+    required_groups: List[str],
+    complaint_label: str,
+    base_sigungu_code: str,
+    base_sido_name: Optional[str],
+) -> tuple[List[RoutingCandidateHospital], ProgressiveSearchResult[RoutingCandidateHospital]]:
+    adjacency = _get_sigungu_adjacency_index()
+    base_code = base_sigungu_code
+
+    levels = build_expansion_levels(
+        base_code=base_code,
+        adjacency_index=adjacency,
+        policy=DEFAULT_EXPANSION_POLICY,
+    )
+
+    def fetch_candidates(sigungu_code: str) -> Sequence[RoutingCandidateHospital]:
+        sigungu_name = adjacency.get_name(sigungu_code)
+        if not sigungu_name:
+            raise ValueError(f"시군구 코드에 대응하는 이름이 없습니다: {sigungu_code}")
+
+        sido_code = adjacency.get_sido_code(sigungu_code)
+        sido_name = SIDO_CODE_TO_NAME.get(sido_code) if sido_code else None
+        if not sido_name:
+            sido_name = base_sido_name
+        if not sido_name:
+            raise ValueError(f"시군구 코드에 대응하는 시도 이름이 없습니다: {sigungu_code}")
+
+        summaries = get_hospital_summaries_by_region(
+            sido=sido_name,
+            sigungu=sigungu_name,
+            sm_type=1,
+            num_rows=200,
+        )
+        print(
+            "[SIGUNGU FETCH] "
+            f"code={sigungu_code} sido={sido_name} sigungu={sigungu_name} "
+            f"raw_summary_count={len(summaries)} "
+            f"sample_hpids={[s.id for s in summaries[:5] if s.id]}"
+        )
+        return _build_routing_candidates_from_summaries(
+            req=req,
+            complaint_id=complaint_id,
+            required_groups=required_groups,
+            complaint_label=complaint_label,
+            summaries=summaries,
+        )
+
+    search_result = search_regions_progressively(
+        levels=levels,
+        fetch_valid_items=fetch_candidates,
+        item_key=lambda hospital: hospital.id,
+        min_valid_items=req.min_valid_hospitals,
+        code_to_name=adjacency.code_to_name,
+    )
+
+    candidates = sorted(
+        search_result.items,
+        key=lambda c: (-c.priority_score, -c.total_effective_beds),
+    )
+    return candidates, search_result
 
 def _compute_coverage_score_and_level(
     required_groups: List[str],
@@ -258,9 +699,19 @@ ermct_client = ErmctClient()
 
 @app.on_event("startup")
 async def startup_event():
+    global sigungu_adjacency_index
     print(" [Startup] Whisper AI 모델 로딩 시작...")
     get_whisper_model()
     print(" [Startup] Whisper AI 모델 로딩 완료!")
+    sigungu_adjacency_index = load_sigungu_adjacency(SIGUNGU_ADJACENCY_PATH)
+    print(f" [Startup] Sigungu adjacency 로딩 완료: {len(sigungu_adjacency_index.all_codes)}개 코드")
+
+
+def _get_sigungu_adjacency_index() -> SigunguAdjacencyIndex:
+    global sigungu_adjacency_index
+    if sigungu_adjacency_index is None:
+        sigungu_adjacency_index = load_sigungu_adjacency(SIGUNGU_ADJACENCY_PATH)
+    return sigungu_adjacency_index
 
 @app.get("/health")
 def health_check():
@@ -1248,148 +1699,75 @@ def route_from_ktas_seoul(req: KTASRoutingRequest = Body(...)):
         required_procedure_group_labels=humanize_procedure_groups(required_groups),
     )
 
-    # 2) 서울 전체 병원 요약 불러오기
-    summaries = _get_all_seoul_summaries(sm_type=1)
+    candidates: List[RoutingCandidateHospital] = []
+    progressive_result: Optional[ProgressiveSearchResult[RoutingCandidateHospital]] = None
+    current_sigungu_code, current_sido_name = _resolve_current_region(req)
 
-    # 3) hospital_followup → home_hpid 해석
-    home_hpid = _resolve_home_hpid_from_followup(
-        summaries=summaries,
-        hospital_followup=req.hospital_followup,
+    print(
+        "[ROUTE SEOUL] "
+        f"chief_complaint={req.chief_complaint} "
+        f"user_lat={req.user_lat!r} "
+        f"user_lon={req.user_lon!r} "
+        f"current_sigungu_name={req.current_sigungu_name!r} "
+        f"resolved_sigungu_code={current_sigungu_code!r} "
+        f"resolved_sido_name={current_sido_name!r}"
     )
 
-    candidates: List[RoutingCandidateHospital] = []
-
-    for s in summaries:
-        basic = s.basic
-        if not basic:
-            continue
-
-        lat = basic.latitude
-        lon = basic.longitude
-        if lat is None or lon is None:
-            # 위치정보 없는 병원은 제외
-            continue
-
-        # 응급실 있는 병원만
-        duty_eryn = basic.raw_fields.get("dutyEryn") if basic.raw_fields else None
-        if duty_eryn != "1":
-            continue
-
-        # 4) 이 병원이 required_groups에 대해 얼마나 수용 가능한지 계산
-        proc_status = procedure_status_for_hospital(s, required_groups)
-        if not proc_status:
-            continue
-
-        groups_with_beds = [
-            gid
-            for gid, info in proc_status.items()
-            if info.get("effective_beds", 0) > 0
-        ]
-
-        # 한 개도 effective_beds가 없다면 제외
-        if not groups_with_beds:
-            continue
-
-        # complaint 전체 기준 병상 수 = bed_type 합집합으로 계산
-        if s.realtime:
-            _, total_eff, _ = get_effective_beds_for_groups(
-                hpid=s.id,
-                realtime=s.realtime,
-                group_ids=groups_with_beds,
-            )
-        else:
-            total_eff = 0
-
-        if total_eff <= 0:
-            continue
-
-        has_any_bed = True  # 위에서 이미 필터링함
-
-        coverage_score, coverage_level = _compute_coverage_score_and_level(
+    if current_sigungu_code:
+        candidates, progressive_result = _search_routing_candidates_progressively(
+            req=req,
+            complaint_id=complaint_id,
             required_groups=required_groups,
-            groups_with_beds=groups_with_beds,
-        )
-
-        groups_with_beds_labels = humanize_procedure_groups(groups_with_beds)
-
-        # 5) MKioskTy 기준 커버 가능한 complaint들 정보 (부가정보용)
-        supported_complaints = sorted(list(complaints_supported_by_hospital(s)))
-        supported_labels = [
-            COMPLAINT_LABELS[cid]
-            for cid in supported_complaints
-            if cid in COMPLAINT_LABELS
-        ]
-
-        # 6) MKioskTy Y 플래그 수집
-        mkiosk_flags: List[str] = []
-        if s.serious and s.serious.mkiosk:
-            mkiosk_flags.extend(
-                [
-                    k
-                    for k, v in s.serious.mkiosk.items()
-                    if v and str(v).upper().startswith("Y")
-                ]
-            )
-        if basic.raw_fields:
-            for k, v in basic.raw_fields.items():
-                if not k.startswith("MKioskTy"):
-                    continue
-                if v and str(v).upper().startswith("Y") and k not in mkiosk_flags:
-                    mkiosk_flags.append(k)
-
-        # 7) home_hpid 여부 + priority_score
-        is_home = bool(home_hpid and s.id == home_hpid)
-        base_score = float(total_eff + (100 if is_home else 0))
-        priority_score = _apply_coverage_weight(
-            base_score=base_score,
-            coverage_level=coverage_level,
-            coverage_score=coverage_score,
-        )
-
-        # 8) reason_summary (coverage 포함)
-        reason = _build_reason_summary_with_coverage(
-            ktas=req.ktas_level,
             complaint_label=complaint_label,
-            groups_with_beds_labels=groups_with_beds_labels,
-            groups_with_beds=groups_with_beds,
-            total_eff=total_eff,
-            coverage_level=coverage_level,
-            coverage_score=coverage_score,
+            base_sigungu_code=current_sigungu_code,
+            base_sido_name=current_sido_name,
         )
 
-        # 9) RoutingCandidateHospital로 변환
-        candidates.append(
-            RoutingCandidateHospital(
-                id=s.id,
-                name=s.name or (basic.name if basic.name else s.id),
-                address=basic.address,
-                phone=basic.phone,
-                emergency_phone=basic.emergency_phone,
-                latitude=lat,
-                longitude=lon,
-                procedure_beds=proc_status,
-                total_effective_beds=total_eff,
-                has_any_bed=has_any_bed,
-                groups_with_beds=groups_with_beds,
-                groups_with_beds_labels=groups_with_beds_labels,
-                supported_complaints=supported_complaints,
-                supported_complaint_labels=supported_labels,
-                mkiosk_flags=mkiosk_flags,
-                coverage_score=coverage_score,
-                coverage_level=coverage_level,
-                priority_score=priority_score,
-                reason_summary=reason,
+    should_run_global_fallback = (
+        progressive_result is None
+        or len(candidates) < req.min_valid_hospitals
+        or any(
+            attempt.fetch_status == "error"
+            for attempt in (progressive_result.attempts if progressive_result else [])
+        )
+    )
+
+    if len(candidates) < req.min_valid_hospitals and should_run_global_fallback:
+        print(
+            "[ROUTE SEOUL] running global fallback "
+            f"candidate_count={len(candidates)} "
+            f"min_valid_hospitals={req.min_valid_hospitals}"
+        )
+        summaries = _get_all_indexed_summaries(sm_type=1)
+        candidates = _build_routing_candidates_from_summaries(
+            req=req,
+            complaint_id=complaint_id,
+            required_groups=required_groups,
+            complaint_label=complaint_label,
+            summaries=summaries,
+        )
+
+    followup_id = None
+    if req.hospital_followup:
+        if req.hospital_followup.startswith("A") and req.hospital_followup[1:].isdigit():
+            followup_id = req.hospital_followup
+        else:
+            followup_id = _resolve_home_hpid_from_followup(
+                summaries=_get_all_indexed_summaries(sm_type=1),
+                hospital_followup=req.hospital_followup,
             )
-        )
 
-    # 10) 정렬: priority_score 우선
-    def sort_key(c: RoutingCandidateHospital):
-        return (-c.priority_score, -c.total_effective_beds)
-
-    candidates.sort(key=sort_key)
+    if progressive_result:
+        for attempt in progressive_result.attempts:
+            print(
+                f"[SIGUNGU SEARCH] level={attempt.level} code={attempt.sigungu_code} "
+                f"name={attempt.sigungu_name} status={attempt.fetch_status} "
+                f"raw_count={attempt.raw_count} "
+                f"candidate_count={attempt.fetched_count} valid_total={attempt.valid_count}"
+            )
 
     return RoutingCandidateResponse(
-        followup_id=home_hpid or None,
+        followup_id=followup_id,
         case=routing_case,
         hospitals=candidates,
     )
@@ -1422,6 +1800,10 @@ async def route_seoul_nearest(
         user_lat=req.user_lat,
         user_lon=req.user_lon,
         hospitals=hospitals_payload,
+    )
+    print(
+        "[ROUTE NEAREST] "
+        f"input_hospitals={len(req.hospitals)} distance_results={len(results)}"
     )
 
     # 3) 거리 기준 상위 3개만 선택
@@ -1464,6 +1846,7 @@ async def predict_audio(audio: UploadFile = File(...)):
     # 1. [Stage 1] 음성 엔진 실행
     print("\n[Stage 1] 음성 분석 및 KTAS 분류 중...")
     stage1_result = ktas_from_audio(audio.file)
+    return _build_stage1_response(stage1_result)
 
     # 2. 데이터 변환
     payload_dict = build_stage2_payload(stage1_result)
@@ -1507,6 +1890,7 @@ async def predict_text(req: TextKTASRequest = Body(...)):
     """
     print("\n[Stage 1] 텍스트 분석 및 KTAS 분류 중...")
     stage1_result = ktas_from_text(req.text)
+    return _build_stage1_response(stage1_result)
 
     payload_dict = build_stage2_payload(stage1_result)
     req_obj = KTASRoutingRequest(**payload_dict)

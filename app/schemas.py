@@ -314,6 +314,28 @@ class KTASRoutingRequest(BaseModel):
     ktas_level: int
     chief_complaint: str
     hospital_followup: Optional[str] = None
+    current_sigungu_code: Optional[str] = Field(
+        default=None,
+        description="사용자 현재 시군구 코드. 주어지면 adjacency 기반 점진 탐색의 시작점으로 사용",
+    )
+    current_sigungu_name: Optional[str] = Field(
+        default=None,
+        description="사용자 현재 시군구명. 코드가 없을 때 코드 해석용으로 사용",
+    )
+    user_lat: Optional[float] = Field(
+        default=None,
+        description="사용자 위도. 현재는 저장만 하며, 이후 실제 거리 기반 정렬 확장용",
+    )
+    user_lon: Optional[float] = Field(
+        default=None,
+        description="사용자 경도. 현재는 저장만 하며, 이후 실제 거리 기반 정렬 확장용",
+    )
+    min_valid_hospitals: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="점진 탐색 종료 기준이 되는 최소 유효 병원 수",
+    )
 
 class ProcedureBedInfo(BaseModel):
     api_beds: int

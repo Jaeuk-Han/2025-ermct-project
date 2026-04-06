@@ -83,6 +83,9 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
   const recordTimeoutRef = useRef<number | null>(null);
+  const locationFallbackTimeoutRef = useRef<number | null>(null);
+  const nearestRequestInFlightRef = useRef(false);
+  const lastNearestRequestKeyRef = useRef<string | null>(null);
   const [patientInfo, setPatientInfo] = useState({
     name: '',
     birthdate: '',
@@ -168,6 +171,9 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
         ktas_level: patientData.ktasLevel,
         chief_complaint: cc || patientData.symptoms,
         hospital_followup: patientData.existingHospital || undefined,
+        user_lat: userLocation?.lat,
+        user_lon: userLocation?.lon,
+        min_valid_hospitals: 3,
       });
 
       setRoutingResponse(base);
@@ -181,44 +187,50 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     } finally {
       setIsLoadingHospitals(false);
     }
-  }, [mapSymptomToChiefComplaintCode, mapToHospital, patientData.existingHospital, patientData.ktasLevel, patientData.symptoms]);
+  }, [mapSymptomToChiefComplaintCode, mapToHospital, patientData.existingHospital, patientData.ktasLevel, patientData.symptoms, userLocation]);
 
-  // Try to refine with geolocation once we already have base routing
-  useEffect(() => {
-    const refineWithLocation = async () => {
-      if (awaitingLocation) return;
-      if (!userLocation || !routingResponse) return;
+  const refineRoutingWithNearest = useCallback(async (
+    baseResponse: RoutingCandidateResponse,
+    lat: number,
+    lon: number,
+  ) => {
+    if (nearestRequestInFlightRef.current) return null;
 
-      const alreadyHasDistance = routingResponse.hospitals.some(
-        (h) => typeof h.distance === 'number',
-      );
-      if (alreadyHasDistance) return;
+    const alreadyHasDistance = baseResponse.hospitals.some(
+      (h) => typeof h.distance === 'number',
+    );
+    if (alreadyHasDistance) return baseResponse;
 
-      setIsLoadingHospitals(true);
-      try {
-        const nearest = await routeNearest({
-          ...routingResponse,
-          user_lat: userLocation.lat,
-          user_lon: userLocation.lon,
-        });
-        setRoutingResponse(nearest);
-        setHospitals(nearest.hospitals.slice(0, 3).map(mapToHospital));
-      } catch (err) {
-        console.error('Error fetching nearest recommendations:', err);
-      } finally {
-        setIsLoadingHospitals(false);
-      }
-    };
-
-    refineWithLocation();
-  }, [awaitingLocation, mapToHospital, routingResponse, userLocation]);
-
-  // Kick off base fetch when entering list view
-  useEffect(() => {
-    if (view === 'list' && !awaitingLocation && (!routingResponse || routingResponse.hospitals.length === 0)) {
-      fetchBackendHospitals();
+    const requestKey = JSON.stringify({
+      lat: Number(lat.toFixed(5)),
+      lon: Number(lon.toFixed(5)),
+      hospitalIds: baseResponse.hospitals.map((h) => h.id),
+    });
+    if (lastNearestRequestKeyRef.current === requestKey) {
+      return null;
     }
-  }, [awaitingLocation, fetchBackendHospitals, view]);
+
+    nearestRequestInFlightRef.current = true;
+    lastNearestRequestKeyRef.current = requestKey;
+    try {
+      const nearest = await routeNearest({
+        ...baseResponse,
+        user_lat: lat,
+        user_lon: lon,
+      });
+      if (!nearest.hospitals?.length) {
+        return null;
+      }
+      setRoutingResponse(nearest);
+      setHospitals(nearest.hospitals.slice(0, 3).map(mapToHospital));
+      return nearest;
+    } catch (err) {
+      console.error('Error fetching nearest recommendations:', err);
+      return null;
+    } finally {
+      nearestRequestInFlightRef.current = false;
+    }
+  }, [mapToHospital]);
 
   // Sync hospitals when routingResponse is already available (e.g., from voice)
   useEffect(() => {
@@ -232,31 +244,44 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     if (view !== 'list' || locationRequested) return;
     if (!('geolocation' in navigator)) {
       setLocationRequested(true);
+      fetchBackendHospitals();
       return;
     }
     setLocationRequested(true);
     setAwaitingLocation(true);
     setIsLoadingHospitals(true);
 
+    // Permission prompt can hang indefinitely; fall back to base routing after the same
+    // window we give geolocation itself, so we do not discard a valid position too early.
+    locationFallbackTimeoutRef.current = window.setTimeout(async () => {
+      console.warn('Geolocation fallback timeout reached; fetching base recommendations without coordinates');
+      setAwaitingLocation(false);
+      await fetchBackendHospitals();
+    }, 15000);
+
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
+        clearLocationFallbackTimeout();
         setUserLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude });
         try {
-          // Base fetch without rendering
           const base = await routeFromKTAS({
             ktas_level: patientData.ktasLevel ?? 0,
             chief_complaint: mapSymptomToChiefComplaintCode(patientData.symptoms) || patientData.symptoms,
             hospital_followup: patientData.existingHospital || undefined,
-          });
-          setRoutingResponse(base);
-          // Nearest with location
-          const nearest = await routeNearest({
-            ...base,
             user_lat: pos.coords.latitude,
             user_lon: pos.coords.longitude,
+            min_valid_hospitals: 3,
           });
-          setRoutingResponse(nearest);
-          setHospitals(nearest.hospitals.slice(0, 3).map(mapToHospital));
+
+          const nearest = await refineRoutingWithNearest(
+            base,
+            pos.coords.latitude,
+            pos.coords.longitude,
+          );
+          if (!nearest || !nearest.hospitals?.length) {
+            setRoutingResponse(base);
+            setHospitals(base.hospitals.slice(0, 3).map(mapToHospital));
+          }
         } catch (err) {
           console.warn('Geolocation fetch failed, falling back to base list', err);
           await fetchBackendHospitals();
@@ -266,12 +291,17 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
         }
       },
       async (err) => {
+        clearLocationFallbackTimeout();
         console.warn('Geolocation error', err);
         setAwaitingLocation(false);
         await fetchBackendHospitals();
       },
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
     );
+
+    return () => {
+      clearLocationFallbackTimeout();
+    };
   }, [fetchBackendHospitals, mapSymptomToChiefComplaintCode, mapToHospital, patientData.existingHospital, patientData.ktasLevel, patientData.symptoms, view, locationRequested]);
 
 // Real-time Subscription for Transfer Request
@@ -470,6 +500,11 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     setKtasLocked(false);
     setRoutingResponse(null);
     setHospitals([]);
+    setUserLocation(null);
+    setLocationRequested(false);
+    setAwaitingLocation(false);
+    lastNearestRequestKeyRef.current = null;
+    clearLocationFallbackTimeout();
     setPatientInfo({
       name: '',
       birthdate: '',
@@ -489,6 +524,13 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     setSelectedHospital(null);
     setRequestStatus('waiting');
     setCurrentRequestId(null);
+  };
+
+  const clearLocationFallbackTimeout = () => {
+    if (locationFallbackTimeoutRef.current) {
+      clearTimeout(locationFallbackTimeoutRef.current);
+      locationFallbackTimeoutRef.current = null;
+    }
   };
 
   const tone = getToneByLevel(patientData.ktasLevel);
