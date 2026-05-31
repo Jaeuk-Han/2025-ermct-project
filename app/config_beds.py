@@ -21,9 +21,9 @@ def _er_beds(rt: HospitalRealtime) -> int:
     """
     응급실 병상.
     """
-    if rt.er_beds is None:
-        return 0
-    return rt.er_beds
+    # HospitalRealtime keeps the raw value. This helper returns effective
+    # available capacity for filtering/scoring, where negatives add no beds.
+    return max(_safe_int(rt.er_beds), 0)
 
 
 def _or_beds(rt: HospitalRealtime) -> int:
@@ -81,6 +81,11 @@ def _ward_psych(rt: HospitalRealtime) -> int:
     return max(hv, 0)
 
 
+def _icu_burn_from_raw(rt: HospitalRealtime) -> int:
+    """Burn ICU availability from hv8."""
+    return max(_safe_int(rt.raw_hv.get("hv8")), 0)
+
+
 # bed_type 이름 -> 실시간 가용병상 계산함수
 BED_TYPE_FUNCS: Dict[str, Callable[[HospitalRealtime], int]] = {
     # 기본 요약 타입
@@ -93,6 +98,7 @@ BED_TYPE_FUNCS: Dict[str, Callable[[HospitalRealtime], int]] = {
     # 신경계 ICU: 둘 다 같은 함수에 매핑해서 key mismatch 방지
     "icu_neuro": _icu_neuro_from_raw,
     "icu_neurosurg": _icu_neuro_from_raw,
+    "icu_burn": _icu_burn_from_raw,
 
     # 정신과 폐쇄병동
     "ward_psych": _ward_psych,
