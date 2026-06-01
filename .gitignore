@@ -17,6 +17,15 @@ poetry.lock
 .idea/
 *.code-workspace
 
+# Personal AI tooling
+/.codex/
+/.agents/
+/.mcp/
+/.ai/
+
+# Codex project instructions
+/AGENTS.md
+
 # Test / cache
 .pytest_cache/
 .mypy_cache/
