@@ -5,6 +5,7 @@ export interface PatientData {
   respiration: string;
   bloodPressure: string;
   pulse: string;
+  oxygenSaturation: string;
   temperature: string;
   symptoms: string;
   existingHospital?: string; // Added field

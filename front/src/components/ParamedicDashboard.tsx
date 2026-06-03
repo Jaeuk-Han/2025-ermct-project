@@ -201,6 +201,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     respiration: '',
     bloodPressure: '',
     pulse: '',
+    oxygenSaturation: '',
     temperature: '',
     symptoms: '',
     existingHospital: '',
@@ -519,6 +520,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     const bpSys = (vitals as any).bp_sys ?? (vitals as any).BP_sys ?? (vitals as any).BP_SYS;
     const bpDia = (vitals as any).bp_dia ?? (vitals as any).BP_dia ?? (vitals as any).BP_DIA;
     const hr = (vitals as any).hr ?? (vitals as any).HR;
+    const spo2 = (vitals as any).spo2 ?? (vitals as any).SpO2 ?? (vitals as any).SPO2;
     const bt = (vitals as any).bt ?? (vitals as any).BT;
     setPatientData((prev) => ({
       ...prev,
@@ -531,6 +533,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
           ? `${bpSys}/${bpDia}`
           : prev.bloodPressure,
       pulse: hr != null ? String(hr) : prev.pulse,
+      oxygenSaturation: spo2 != null ? String(spo2) : prev.oxygenSaturation,
       temperature: bt != null ? String(bt) : prev.temperature,
     }));
     if (result.case?.ktas != null) {
@@ -680,6 +683,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
       respiration: '',
       bloodPressure: '',
       pulse: '',
+      oxygenSaturation: '',
       temperature: '',
       symptoms: '',
       existingHospital: '',
@@ -1119,6 +1123,34 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     };
   }, []);
 
+  const displayValue = (value?: string | null) => {
+    const text = String(value ?? '').trim();
+    return text || "-";
+  };
+
+  const displayWithUnit = (value: string | undefined, unit: string) => {
+    const text = displayValue(value);
+    if (text === "-") return text;
+    return text.endsWith(unit) ? text : `${text} ${unit}`;
+  };
+
+  const displaySpO2 = (value: string | undefined) => {
+    const text = displayValue(value);
+    if (text === "-") return text;
+    return text.endsWith("%") ? text : `${text}%`;
+  };
+
+  const displayTemperature = (value: string | undefined) => {
+    const text = displayValue(value);
+    if (text === "-") return text;
+
+    const numericValue = Number(text);
+    if (Number.isFinite(numericValue)) {
+      return `${numericValue.toFixed(1)}°C`;
+    }
+    return text;
+  };
+
   const tone = getToneByLevel(patientData.ktasLevel);
 
   return (
@@ -1354,6 +1386,18 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                             </div>
                             <div className="col-span-2 md:col-span-1">
                                 <label className="mb-2 flex items-center gap-2 text-lg font-bold text-gray-600">
+                                    <Activity size={20} className="text-[#00796B]" /> 산소포화도 (SpO₂)
+                                </label>
+                                <ModernInput
+                                    placeholder="예) 95"
+                                    value={patientData.oxygenSaturation}
+                                    onChange={(e) => setPatientData(prev => ({...prev, oxygenSaturation: e.target.value}))}
+                                    type="number"
+                                    className="text-center font-mono !text-2xl !font-black !h-16"
+                                />
+                            </div>
+                            <div className="col-span-2 md:col-span-1">
+                                <label className="mb-2 flex items-center gap-2 text-lg font-bold text-gray-600">
                                     <Thermometer size={20} className="text-[#00796B]" /> 체온
                                 </label>
                                 <ModernInput 
@@ -1416,7 +1460,10 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                         try {
                           setIsProcessingVoice(true);
                           const genderText = patientInfo.gender === 'M' ? '남성' : patientInfo.gender === 'F' ? '여성' : '';
-                          const report = `환자 보고: ${patientInfo.age || ''}세 ${genderText} 환자. 이름: ${patientInfo.name || '정보 없음'}. 생년월일: ${patientInfo.birthdate || '정보 없음'}. 주증상: ${patientData.symptoms}. 의식: ${patientData.consciousness}. 호흡수: ${patientData.respiration || '정보 없음'}. 맥박: ${patientData.pulse || '정보 없음'}. 혈압: ${patientData.bloodPressure || '정보 없음'}. 체온: ${patientData.temperature || '정보 없음'}. 평소 병원: ${patientData.existingHospital || '정보 없음'}.`;
+                          const oxygenSaturationText = patientData.oxygenSaturation.trim()
+                            ? ` 산소포화도 ${patientData.oxygenSaturation.trim()}%.`
+                            : '';
+                          const report = `환자 보고: ${patientInfo.age || ''}세 ${genderText} 환자. 이름: ${patientInfo.name || '정보 없음'}. 생년월일: ${patientInfo.birthdate || '정보 없음'}. 주증상: ${patientData.symptoms}. 의식: ${patientData.consciousness}. 호흡수: ${patientData.respiration || '정보 없음'}.${oxygenSaturationText} 맥박: ${patientData.pulse || '정보 없음'}. 혈압: ${patientData.bloodPressure || '정보 없음'}. 체온: ${patientData.temperature || '정보 없음'}. 평소 병원: ${patientData.existingHospital || '정보 없음'}.`;
                           const result = await predictText(report);
                           applyBackendResult(result);
                         } catch (err) {
@@ -1495,20 +1542,24 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                       <p className="text-2xl font-black text-gray-800">{patientData.consciousness || "-"}</p>
                     </div>
                     <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-                      <p className="text-sm text-gray-500 font-bold mb-1">호흡수</p>
-                      <p className="text-2xl font-black text-gray-800">{patientData.respiration || "-"}</p>
-                    </div>
-                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
                       <p className="text-sm text-gray-500 font-bold mb-1">혈압</p>
-                      <p className="text-2xl font-black text-gray-800">{patientData.bloodPressure || "-"}</p>
+                      <p className="text-2xl font-black text-gray-800">{displayWithUnit(patientData.bloodPressure, "mmHg")}</p>
                     </div>
                     <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
                       <p className="text-sm text-gray-500 font-bold mb-1">맥박</p>
-                      <p className="text-2xl font-black text-gray-800">{patientData.pulse || "-"}</p>
+                      <p className="text-2xl font-black text-gray-800">{displayWithUnit(patientData.pulse, "bpm")}</p>
                     </div>
-                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)] col-span-2">
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                      <p className="text-sm text-gray-500 font-bold mb-1">호흡수</p>
+                      <p className="text-2xl font-black text-gray-800">{displayWithUnit(patientData.respiration, "/min")}</p>
+                    </div>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+                      <p className="text-sm text-gray-500 font-bold mb-1">산소포화도 (SpO₂)</p>
+                      <p className="text-2xl font-black text-gray-800">{displaySpO2(patientData.oxygenSaturation)}</p>
+                    </div>
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
                       <p className="text-sm text-gray-500 font-bold mb-1">체온</p>
-                      <p className="text-2xl font-black text-gray-800">{patientData.temperature || "-"}</p>
+                      <p className="text-2xl font-black text-gray-800">{displayTemperature(patientData.temperature)}</p>
                     </div>
                   </div>
                 </div>
