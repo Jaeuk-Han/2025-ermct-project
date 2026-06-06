@@ -6,17 +6,57 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './ui/DesignSystem';
-import { HospitalRequest } from '../types';
+import { HospitalRequest, TransferStatus } from '../types';
 import { supabase } from '../utils/supabase/client';
 
 interface ERTabletDashboardProps {
+  hospitalId?: string | null;
   onLogout: () => void;
 }
 
 type TabType = 'dash' | 'patients' | 'status';
+type BedService = { name: string; available: number; total: number };
+type BedStatusState = 'loading' | 'ready' | 'empty' | 'error';
+type PatientCaseRow = {
+  display_name?: string | null;
+  age?: number | null;
+  gender?: string | null;
+  symptoms?: string | null;
+  extra_note?: string | null;
+  summary?: string | null;
+  ktas_level?: number | null;
+  ktas_label?: string | null;
+  ktas_name?: string | null;
+  complaint_label?: string | null;
+  consciousness?: string | null;
+  vitals_bp?: string | null;
+  vitals_pulse?: number | null;
+  vitals_resp?: number | null;
+  vitals_spo2?: number | null;
+  vitals_temp?: number | null;
+  existing_hospital?: string | null;
+  route_eta_min?: number | null;
+  route_distance_km?: number | null;
+  recommendation_reason?: string | null;
+};
+
+const TRANSFER_STATUSES: TransferStatus[] = [
+  'waiting',
+  'approved',
+  'rejected',
+  'transferring',
+  'completed',
+  'cancelled',
+];
+
+function normalizeTransferStatus(status: unknown): TransferStatus {
+  return TRANSFER_STATUSES.includes(status as TransferStatus)
+    ? status as TransferStatus
+    : 'waiting';
+}
 
 // ── 데모 모드 감지 ─────────────────────────────────────────
-const demoAuthEnabled = Boolean((import.meta as any)?.env?.VITE_DEMO_AUTH);
+const demoAuthEnabled = (import.meta as any)?.env?.VITE_DEMO_AUTH === 'true';
 
 // ── 데모용 목업 환자 데이터 ────────────────────────────────
 // TODO: 실제 서비스 시 Supabase 또는 FastAPI /api/transfer-requests 로 교체
@@ -25,35 +65,35 @@ const DEMO_REQUESTS: HospitalRequest[] = [
     id: 'demo-1', ktasLevel: 1, consciousness: 'Unresponsive',
     symptoms: '의식 변화 (Altered Mental Status)',
     eta: 5, paramedicUnit: '서울 강남소방서', paramedicName: '김○○ 대원',
-    timestamp: new Date(), status: 'pending',
+    timestamp: new Date(), status: 'waiting',
     patientData: { consciousness: 'Unresponsive', respiration: '18', bloodPressure: '80/50', pulse: '120', temperature: '36.8', symptoms: '의식 변화', ktasLevel: 1 },
   },
   {
     id: 'demo-2', ktasLevel: 1, consciousness: 'Alert',
     symptoms: '가슴 통증 (Chest Pain)',
     eta: 12, paramedicUnit: '서울 송파소방서', paramedicName: '이○○ 대원',
-    timestamp: new Date(), status: 'pending',
+    timestamp: new Date(), status: 'waiting',
     patientData: { consciousness: 'Alert', respiration: '20', bloodPressure: '110/70', pulse: '98', temperature: '36.5', symptoms: '가슴 통증', ktasLevel: 1 },
   },
   {
     id: 'demo-3', ktasLevel: 2, consciousness: 'Alert',
     symptoms: '호흡 곤란 (Dyspnea)',
     eta: 8, paramedicUnit: '서울 관악소방서', paramedicName: '박○○ 대원',
-    timestamp: new Date(), status: 'pending',
+    timestamp: new Date(), status: 'waiting',
     patientData: { consciousness: 'Alert', respiration: '28', bloodPressure: '90/60', pulse: '104', temperature: '37.1', symptoms: '호흡 곤란', ktasLevel: 2 },
   },
   {
     id: 'demo-4', ktasLevel: 3, consciousness: 'Alert',
     symptoms: '외상 (Trauma) — 교통사고',
     eta: 18, paramedicUnit: '서울 마포소방서', paramedicName: '최○○ 대원',
-    timestamp: new Date(), status: 'pending',
+    timestamp: new Date(), status: 'waiting',
     patientData: { consciousness: 'Alert', respiration: '16', bloodPressure: '128/82', pulse: '88', temperature: '36.6', symptoms: '외상', ktasLevel: 3 },
   },
   {
     id: 'demo-5', ktasLevel: 3, consciousness: 'Alert',
     symptoms: '복통 (Abdominal Pain)',
     eta: 22, paramedicUnit: '서울 영등포소방서', paramedicName: '정○○ 대원',
-    timestamp: new Date(), status: 'pending',
+    timestamp: new Date(), status: 'waiting',
     patientData: { consciousness: 'Alert', respiration: '17', bloodPressure: '118/76', pulse: '92', temperature: '37.4', symptoms: '복통', ktasLevel: 3 },
   },
 ];
@@ -69,7 +109,7 @@ const KTAS_STYLE: Record<number, { bg: string; etaColor: string }> = {
 
 // ── 목업 병상·인력 데이터 ──────────────────────────────────
 // TODO: 실제 서비스 시 FastAPI /api/hospitals/realtime 로 교체
-const BED_SERVICES = [
+const DEMO_BED_SERVICES = [
   { name: '응급일반',   available: 15, total: 22 },
   { name: '응급조사',   available: 0,  total: 2  },
   { name: '분만실',     available: 3,  total: 3  },
@@ -78,7 +118,7 @@ const BED_SERVICES = [
   { name: '코호트격리', available: 0,  total: 6  },
 ];
 // TODO: 실제 서비스 시 Supabase 수락된 transfer_requests 목록으로 교체
-const RECENTLY_ACCEPTED = [
+const RECENTLY_APPROVED = [
   { name: '박○○', age: 72, gender: '남', diagnosis: '복통',     ktas: 2, time: '14:18' },
   { name: '이○○', age: 45, gender: '여', diagnosis: '호흡곤란', ktas: 2, time: '13:52' },
   { name: '최○○', age: 58, gender: '남', diagnosis: '흉통',     ktas: 1, time: '13:31' },
@@ -131,14 +171,39 @@ function BedBar({ name, available, total }: { name: string; available: number; t
 }
 
 // ── 메인 컴포넌트 ──────────────────────────────────────────
-export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }) => {
+function mapHospitalStatus(row: any): BedService[] {
+  if (Array.isArray(row.bed_services) && row.bed_services.length > 0) {
+    return row.bed_services.map((service: any) => ({
+      name: String(service.name || service.label || 'Bed'),
+      available: Number(service.available ?? service.available_beds ?? 0),
+      total: Number(service.total ?? service.total_beds ?? 0),
+    }));
+  }
+
+  return [
+    { name: 'ER', available: Number(row.er_available_beds ?? row.available_beds ?? 0), total: Number(row.er_total_beds ?? row.total_beds ?? 0) },
+    { name: 'ICU', available: Number(row.icu_available_beds ?? 0), total: Number(row.icu_total_beds ?? 0) },
+    { name: 'Isolation', available: Number(row.isolation_available_beds ?? 0), total: Number(row.isolation_total_beds ?? 0) },
+  ];
+}
+
+export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ hospitalId, onLogout }) => {
   const [activeTab,       setActiveTab]       = useState<TabType>('dash');
-  // 이송 요청 대기 (수락 전 pending 상태)
+  // 이송 요청 대기 (수락 전 waiting 상태)
   const [requests,        setRequests]        = useState<HospitalRequest[]>(DEMO_REQUESTS);
   // 수락된 환자 (이송 중 → 대기 환자 탭에 표시)
-  const [accepted,        setAccepted]        = useState<HospitalRequest[]>([]);
+  const [approved,        setApproved]        = useState<HospitalRequest[]>([]);
+  const [bedServices,     setBedServices]     = useState<BedService[]>(
+    demoAuthEnabled ? DEMO_BED_SERVICES : [],
+  );
+  const [bedStatusState,  setBedStatusState]  = useState<BedStatusState>(
+    demoAuthEnabled ? 'ready' : hospitalId ? 'loading' : 'empty',
+  );
   const [rejectModal,     setRejectModal]     = useState<string | null>(null);
   const [selectedRequest, setSelectedRequest] = useState<HospitalRequest | null>(null);
+  const [selectedPatientCase, setSelectedPatientCase] = useState<PatientCaseRow | null>(null);
+  const [patientCaseLoading, setPatientCaseLoading] = useState(false);
+  const [patientCaseError, setPatientCaseError] = useState<string | null>(null);
   const [isLoading,       setIsLoading]       = useState(false);
   const [currentTime,     setCurrentTime]     = useState('');
   const [ktasFilter,      setKtasFilter]      = useState<'all' | '1-2'>('all');
@@ -159,28 +224,68 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
     // 데모 모드 → 목업 데이터 사용
     if (demoAuthEnabled) {
       setRequests(DEMO_REQUESTS);
+      setBedServices(DEMO_BED_SERVICES);
+      setBedStatusState('ready');
+      return;
+    }
+
+    if (!hospitalId) {
+      setRequests([]);
+      setApproved([]);
+      setBedServices([]);
+      setBedStatusState('empty');
       return;
     }
 
     let cleanup: (() => void) | undefined;
+    const fetchTransferRequests = async () => {
+      const { data } = await supabase
+        .from('transfer_requests').select('*')
+        .eq('hospital_id', hospitalId)
+        .in('status', ['waiting', 'approved', 'transferring'])
+        .order('created_at', { ascending: false });
+
+      const rows = (data || []).map(mapRow);
+      setRequests(rows.filter(req => req.status === 'waiting'));
+      setApproved(rows.filter(req => req.status === 'approved' || req.status === 'transferring'));
+    };
+
+    const fetchHospitalStatus = async () => {
+      setBedStatusState('loading');
+      const { data, error } = await supabase
+        .from('hospital_status').select('*')
+        .eq('hospital_id', hospitalId)
+        .maybeSingle();
+
+      if (error) {
+        console.error('Failed to load hospital status:', error);
+        setBedServices([]);
+        setBedStatusState('error');
+        return;
+      }
+
+      if (data) {
+        const mapped = mapHospitalStatus(data);
+        setBedServices(mapped);
+        setBedStatusState(mapped.length > 0 ? 'ready' : 'empty');
+        return;
+      }
+
+      setBedServices([]);
+      setBedStatusState('empty');
+    };
+
     const fetchData = async () => {
       setIsLoading(true);
       try {
-        const { data: hospData } = await supabase
-          .from('hospitals').select('id').eq('name', '서울대학교병원').single();
-        if (!hospData) { setIsLoading(false); return; }
-
-        const { data: reqData } = await supabase
-          .from('transfer_requests').select('*')
-          .eq('hospital_id', hospData.id).eq('status', 'waiting')
-          .order('created_at', { ascending: false });
-
-        if (reqData) setRequests(reqData.map(mapRow));
+        await Promise.all([fetchTransferRequests(), fetchHospitalStatus()]);
         setIsLoading(false);
 
-        const channel = supabase.channel('er-tablet')
-          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transfer_requests', filter: `hospital_id=eq.${hospData.id}` },
-            (payload) => setRequests(prev => [mapRow(payload.new), ...prev]))
+        const channel = supabase.channel(`er-tablet-${hospitalId}`)
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'transfer_requests', filter: `hospital_id=eq.${hospitalId}` },
+            () => { void fetchTransferRequests(); })
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'hospital_status', filter: `hospital_id=eq.${hospitalId}` },
+            () => { void fetchHospitalStatus(); })
           .subscribe();
         cleanup = () => { supabase.removeChannel(channel); };
       } catch {
@@ -189,16 +294,27 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
     };
     fetchData();
     return () => { cleanup?.(); };
-  }, []);
+  }, [hospitalId]);
 
   const mapRow = (r: any): HospitalRequest => ({
-    id: r.id, ktasLevel: r.ktas_level, consciousness: r.consciousness || 'Alert',
-    symptoms: r.symptoms, eta: 10, paramedicUnit: '119 구급대',
-    paramedicName: r.paramedic_name || '대원', timestamp: new Date(r.created_at), status: r.status,
+    id: r.id,
+    ktasLevel: r.ktas_level || 3,
+    consciousness: r.consciousness || 'Alert',
+    symptoms: r.symptoms || '-',
+    eta: r.route_eta_min ?? 10,
+    paramedicUnit: r.paramedic_unit || '119',
+    paramedicName: r.paramedic_name || 'Paramedic',
+    timestamp: new Date(r.requested_at || r.created_at),
+    status: normalizeTransferStatus(r.status),
     patientData: {
-      consciousness: r.consciousness || 'Alert', respiration: r.vitals_resp?.toString() || '-',
-      bloodPressure: r.vitals_bp || '-', pulse: r.vitals_pulse?.toString() || '-',
-      temperature: r.vitals_temp?.toString() || '36.5', symptoms: r.symptoms, ktasLevel: r.ktas_level,
+      consciousness: r.consciousness || 'Alert',
+      respiration: r.vitals_resp?.toString() || '-',
+      bloodPressure: r.vitals_bp || '-',
+      pulse: r.vitals_pulse?.toString() || '-',
+      oxygenSaturation: r.vitals_spo2?.toString() || '-',
+      temperature: r.vitals_temp?.toString() || '36.5',
+      symptoms: r.symptoms || '-',
+      ktasLevel: r.ktas_level || 3,
     },
   });
 
@@ -206,7 +322,7 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
     const req = requests.find(r => r.id === id);
     if (req) {
       setRequests(prev => prev.filter(r => r.id !== id));
-      setAccepted(prev => [{ ...req, status: 'accepted' as const }, ...prev]);
+      setApproved(prev => [{ ...req, status: 'approved' as const }, ...prev]);
     }
     setSelectedRequest(null);
     setActiveTab('patients'); // 수락 후 대기 환자 탭으로 이동
@@ -224,21 +340,122 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
   };
 
   // 집계
+  const closePatientDetail = () => {
+    setSelectedRequest(null);
+    setSelectedPatientCase(null);
+    setPatientCaseError(null);
+    setPatientCaseLoading(false);
+  };
+
+  const openPatientDetail = async (req: HospitalRequest) => {
+    setSelectedRequest(req);
+    setSelectedPatientCase(null);
+    setPatientCaseError(null);
+
+    if (demoAuthEnabled) {
+      return;
+    }
+
+    setPatientCaseLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('patient_cases')
+        .select('display_name, age, gender, symptoms, extra_note, summary, ktas_level, ktas_label, ktas_name, complaint_label, consciousness, vitals_bp, vitals_pulse, vitals_resp, vitals_spo2, vitals_temp, existing_hospital, route_eta_min, route_distance_km, recommendation_reason')
+        .eq('transfer_request_id', req.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error('Failed to load patient case:', error);
+        setPatientCaseError('Patient case detail could not be loaded.');
+        return;
+      }
+
+      setSelectedPatientCase(data as PatientCaseRow | null);
+    } catch (error) {
+      console.error('Failed to load patient case:', error);
+      setPatientCaseError('Patient case detail could not be loaded.');
+    } finally {
+      setPatientCaseLoading(false);
+    }
+  };
+
   const criticalCount  = requests.filter(r => r.ktasLevel <= 2).length;
-  const acceptedCount  = accepted.length;
-  const totalAvailable = BED_SERVICES.reduce((s, b) => s + b.available, 0);
-  const totalBeds      = BED_SERVICES.reduce((s, b) => s + b.total,     0);
-  const filteredAccepted = ktasFilter === '1-2' ? accepted.filter(r => r.ktasLevel <= 2) : accepted;
-  const ktasCounts     = [1,2,3,4,5].map(k => ({ level: k, count: accepted.filter(r => r.ktasLevel === k).length }));
+  const approvedCount  = approved.length;
+  const hasBedStatusData = bedStatusState === 'ready' && bedServices.length > 0;
+  const totalAvailable = bedServices.reduce((s, b) => s + b.available, 0);
+  const totalBeds      = bedServices.reduce((s, b) => s + b.total,     0);
+  const primaryBedService = bedServices[0] ?? { name: 'ER', available: 0, total: 0 };
+  const bedAvailabilityPercent = totalBeds > 0 ? Math.round((totalAvailable / totalBeds) * 100) : 0;
+  const bedStatusMessage =
+    bedStatusState === 'loading'
+      ? 'Loading hospital bed status...'
+      : bedStatusState === 'error'
+        ? 'Hospital bed status could not be loaded.'
+        : 'No hospital bed status data.';
+  const filteredApproved = ktasFilter === '1-2' ? approved.filter(r => r.ktasLevel <= 2) : approved;
+  const ktasCounts     = [1,2,3,4,5].map(k => ({ level: k, count: approved.filter(r => r.ktasLevel === k).length }));
   const maxKtas        = Math.max(...ktasCounts.map(k => k.count), 1);
 
   // ── 환자 상세 뷰 ──────────────────────────────────────
+  const BedStatusPlaceholder = ({ compact = false }: { compact?: boolean }) => (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      minHeight: compact ? 44 : 76,
+      padding: compact ? '10px 0' : '16px 10px',
+      color: '#64748b',
+      fontSize: compact ? 11 : 12,
+      textAlign: 'center',
+    }}>
+      {bedStatusState === 'loading' ? <Loader2 className="animate-spin" size={14} /> : <AlertCircle size={14} />}
+      <span>{bedStatusMessage}</span>
+    </div>
+  );
+
   const PatientDetail = ({ req }: { req: HospitalRequest }) => {
-    const ktas  = KTAS_STYLE[req.ktasLevel] ?? KTAS_STYLE[3];
-    const extra = DEMO_EXTRA[req.id] ?? { age: 45, gender: '미상', note: '-', spo2: 98 };
-    const bp    = req.patientData.bloodPressure;
-    const hr    = req.patientData.pulse;
-    const rr    = req.patientData.respiration;
+    const patientCase = selectedPatientCase;
+    const extra = DEMO_EXTRA[req.id] ?? { age: 45, gender: 'unknown', note: '-', spo2: 98 };
+    const ktasLevel = patientCase?.ktas_level ?? req.ktasLevel;
+    const ktas = KTAS_STYLE[ktasLevel] ?? KTAS_STYLE[3];
+    const ktasText = patientCase?.ktas_label || patientCase?.ktas_name || KTAS_NAMES[ktasLevel] || '-';
+    const displayName = patientCase?.display_name || 'Masked patient';
+    const age = patientCase?.age ?? extra.age;
+    const gender = patientCase?.gender || extra.gender;
+    const consciousness = patientCase?.consciousness || req.consciousness;
+    const symptoms = patientCase?.symptoms || req.symptoms;
+    const complaintLabel = patientCase?.complaint_label || '-';
+    const extraNote = patientCase?.extra_note || extra.note;
+    const summary = patientCase?.summary || '-';
+    const existingHospital = patientCase?.existing_hospital || '-';
+    const recommendationReason = patientCase?.recommendation_reason || '-';
+    const routeEta = patientCase?.route_eta_min ?? req.eta;
+    const routeDistance = patientCase?.route_distance_km != null ? String(patientCase.route_distance_km) + ' km' : '-';
+    const bp = patientCase?.vitals_bp || req.patientData.bloodPressure;
+    const hr = patientCase?.vitals_pulse?.toString() || req.patientData.pulse;
+    const rr = patientCase?.vitals_resp?.toString() || req.patientData.respiration;
+    const spo2 = patientCase?.vitals_spo2?.toString() || req.patientData.oxygenSaturation || extra.spo2.toString();
+    const temp = patientCase?.vitals_temp?.toString() || req.patientData.temperature;
+    const spo2Number = Number(spo2);
+
+    const infoRows = [
+      { label: 'Display name', value: displayName },
+      { label: 'Age', value: age != null ? String(age) : '-' },
+      { label: 'Gender', value: gender },
+      { label: 'Consciousness', value: consciousness },
+      { label: 'Complaint', value: complaintLabel },
+      { label: 'Existing hospital', value: existingHospital },
+      { label: 'Route distance', value: routeDistance },
+    ];
+
+    const vitals = [
+      { label: 'BP', value: bp, unit: 'mmHg', warn: bp !== '-' && parseInt(bp) < 90 },
+      { label: 'Pulse', value: hr, unit: 'bpm', warn: Number(hr) > 100 || Number(hr) < 50 },
+      { label: 'Respiration', value: rr, unit: 'breaths/min', warn: Number(rr) > 24 || Number(rr) < 10 },
+      { label: 'SpO2', value: spo2 !== '-' ? spo2 + '%' : '-', unit: 'oxygen', warn: Number.isFinite(spo2Number) && spo2Number < 90 },
+      { label: 'Temperature', value: temp, unit: 'C', warn: Number(temp) >= 38 },
+    ];
 
     return (
       <motion.div
@@ -246,97 +463,72 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
         animate={{ x: 0 }}
         exit={{ x: '100%' }}
         transition={{ type: 'spring', damping: 30, stiffness: 320 }}
-        style={{
-          position: 'fixed', inset: 0, zIndex: 45,
-          background: '#f8fafc', overflowY: 'auto',
-          fontFamily: 'system-ui, sans-serif',
-        }}
+        style={{ position: 'fixed', inset: 0, zIndex: 45, background: '#f8fafc', overflowY: 'auto', fontFamily: 'system-ui, sans-serif' }}
       >
-        {/* 헤더 */}
-        <div style={{
-          background: '#fff', borderBottom: '1px solid #e2e8f0',
-          padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10,
-          position: 'sticky', top: 0, zIndex: 1,
-        }}>
-          <button
-            onClick={() => setSelectedRequest(null)}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '6px', color: '#1e293b', display: 'flex', alignItems: 'center', borderRadius: 8 }}
-          >
+        <div style={{ background: '#fff', borderBottom: '1px solid #e2e8f0', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, position: 'sticky', top: 0, zIndex: 1 }}>
+          <button onClick={closePatientDetail} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '6px', color: '#1e293b', display: 'flex', alignItems: 'center', borderRadius: 8 }}>
             <ChevronLeft size={22} />
           </button>
           <div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: '#1e293b' }}>환자 상세 정보</div>
-            <div style={{ fontSize: 11, color: '#94a3b8' }}>Patient Details</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#1e293b' }}>Patient Detail</div>
+            <div style={{ fontSize: 11, color: '#94a3b8' }}>patient_cases fallback enabled</div>
           </div>
         </div>
 
         <div style={{ padding: '16px', maxWidth: 600, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {patientCaseLoading && (
+            <div style={{ background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 8, color: '#64748b', fontSize: 13 }}>
+              <Loader2 className="animate-spin" size={16} /> Loading patient case detail...
+            </div>
+          )}
+          {patientCaseError && (
+            <div style={{ background: '#fef2f2', borderRadius: 10, border: '1px solid #fecaca', padding: '12px 14px', color: '#991b1b', fontSize: 13 }}>
+              {patientCaseError}
+            </div>
+          )}
 
-          {/* KTAS 배너 */}
-          <div style={{
-            background: ktas.bg, borderRadius: 14, padding: '16px 20px',
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          }}>
+          <div style={{ background: ktas.bg, borderRadius: 14, padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <AlertTriangle size={16} color="rgba(255,255,255,0.9)" />
-                <span style={{ fontSize: 17, fontWeight: 700, color: '#fff' }}>KTAS Level {req.ktasLevel}</span>
+                <span style={{ fontSize: 17, fontWeight: 700, color: '#fff' }}>KTAS Level {ktasLevel}</span>
               </div>
-              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>
-                {KTAS_NAMES[req.ktasLevel]}
-              </div>
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>{ktasText}</div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 15, fontWeight: 700, color: '#fff' }}>
-              <Clock size={15} /> {req.eta}분 후
+              <Clock size={15} /> ETA {routeEta} min
             </div>
           </div>
 
-          {/* 환자 정보 */}
           <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #e2e8f0', padding: '16px 18px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 700, color: '#475569', marginBottom: 14 }}>
-              <User size={14} /> 환자 정보
+              <User size={14} /> Patient
             </div>
-            {[
-              { label: '나이 / Age',    value: `${extra.age}세` },
-              { label: '성별 / Gender', value: extra.gender },
-              { label: '의식 수준',     value: req.consciousness },
-            ].map((row, i, arr) => (
-              <div key={i} style={{
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                padding: '9px 0', borderBottom: i < arr.length - 1 ? '1px solid #f1f5f9' : 'none',
-              }}>
+            {infoRows.map((row, i, arr) => (
+              <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '9px 0', borderBottom: i < arr.length - 1 ? '1px solid #f1f5f9' : 'none' }}>
                 <span style={{ fontSize: 13, color: '#94a3b8' }}>{row.label}</span>
-                <span style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>{row.value}</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#1e293b', textAlign: 'right' }}>{row.value}</span>
               </div>
             ))}
           </div>
 
-          {/* 주 증상 */}
           <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #e2e8f0', padding: '16px 18px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 700, color: '#475569', marginBottom: 12 }}>
-              <AlertCircle size={14} /> 주 증상 / 진단
+              <AlertCircle size={14} /> Symptoms / Handoff
             </div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: '#1e293b', marginBottom: 6 }}>{req.symptoms}</div>
-            <div style={{ fontSize: 13, color: '#64748b', lineHeight: 1.5 }}>{extra.note}</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: '#1e293b', marginBottom: 6 }}>{symptoms}</div>
+            <div style={{ fontSize: 13, color: '#64748b', lineHeight: 1.5 }}>{extraNote}</div>
+            {summary !== '-' && <div style={{ fontSize: 12, color: '#475569', lineHeight: 1.5, marginTop: 8 }}>Summary: {summary}</div>}
+            {recommendationReason !== '-' && <div style={{ fontSize: 12, color: '#475569', lineHeight: 1.5, marginTop: 6 }}>Recommendation: {recommendationReason}</div>}
           </div>
 
-          {/* 활력징후 */}
           <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #e2e8f0', padding: '16px 18px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 700, color: '#475569', marginBottom: 14 }}>
-              <Activity size={14} /> 활력징후 / Vital Signs
+              <Activity size={14} /> Vital Signs
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              {[
-                { label: '혈압 (BP)',          value: bp,              unit: 'mmHg',        warn: bp !== '-' && parseInt(bp) < 90 },
-                { label: '심박수 (HR)',         value: hr,              unit: 'bpm',         warn: Number(hr) > 100 || Number(hr) < 50 },
-                { label: '호흡수 (RR)',         value: rr,              unit: 'breaths/min', warn: Number(rr) > 24 || Number(rr) < 10 },
-                { label: '산소포화도 (SpO₂)',   value: `${extra.spo2}%`, unit: 'oxygen',     warn: extra.spo2 < 90 },
-              ].map((v, i) => (
-                <div key={i} style={{
-                  background: v.warn ? '#fef2f2' : '#f8fafc',
-                  border: v.warn ? '1px solid #fecaca' : '1px solid transparent',
-                  borderRadius: 10, padding: '12px 14px',
-                }}>
+              {vitals.map((v) => (
+                <div key={v.label} style={{ background: v.warn ? '#fef2f2' : '#f8fafc', border: v.warn ? '1px solid #fecaca' : '1px solid transparent', borderRadius: 10, padding: '12px 14px' }}>
                   <div style={{ fontSize: 11, color: v.warn ? '#ef4444' : '#94a3b8', marginBottom: 4 }}>{v.label}</div>
                   <div style={{ fontSize: 22, fontWeight: 700, color: v.warn ? '#dc2626' : '#1e293b', lineHeight: 1 }}>{v.value}</div>
                   <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 4 }}>{v.unit}</div>
@@ -345,67 +537,32 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
             </div>
           </div>
 
-          {/* 출발지 */}
           <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #e2e8f0', padding: '16px 18px' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#475569', marginBottom: 12 }}>출발지 / Location</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#475569', marginBottom: 12 }}>Transfer</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-              <div style={{
-                width: 44, height: 44, background: '#eff6ff', borderRadius: 12,
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-              }}>
+              <div style={{ width: 44, height: 44, background: '#eff6ff', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                 <Phone size={18} color="#3b82f6" />
               </div>
               <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b' }}>
-                  {req.paramedicUnit} · {req.paramedicName}
-                </div>
-                <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 3 }}>구급차 연락처: 119</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b' }}>{req.paramedicUnit} ? {req.paramedicName}</div>
+                <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 3 }}>ETA {routeEta} min ? Distance {routeDistance}</div>
               </div>
             </div>
           </div>
 
-          {/* 처리 지침 */}
-          <div style={{
-            background: '#eff6ff', border: '1px solid #bfdbfe',
-            borderRadius: 14, padding: '14px 16px',
-            display: 'flex', gap: 10, alignItems: 'flex-start',
-          }}>
-            <AlertCircle size={16} color="#3b82f6" style={{ flexShrink: 0, marginTop: 1 }} />
-            <div style={{ fontSize: 13, color: '#1d4ed8', lineHeight: 1.65 }}>
-              응급 환자 이송 요청을 신중히 검토하고, 병상 가용성과 환자 중증도를 고려하여 승인 또는 거절 결정을 내려주세요.
-            </div>
-          </div>
-
-          {/* 액션 버튼 */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 10, paddingBottom: 24 }}>
-            <button
-              onClick={() => setRejectModal(req.id)}
-              style={{
-                padding: '14px', borderRadius: 12, border: '2px solid #fecaca',
-                background: '#fff', color: '#ef4444', fontSize: 14, fontWeight: 700, cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-              }}
-            >
-              <XCircle size={16} /> 거절 (NO)
+            <button onClick={() => setRejectModal(req.id)} style={{ padding: '14px', borderRadius: 12, border: '2px solid #fecaca', background: '#fff', color: '#ef4444', fontSize: 14, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+              <XCircle size={16} /> Reject
             </button>
-            <button
-              onClick={() => handleApprove(req.id)}
-              style={{
-                padding: '14px', borderRadius: 12, border: 'none',
-                background: '#16a34a', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-              }}
-            >
-              <CheckCircle2 size={16} /> 수락 (YES)
+            <button onClick={() => handleApprove(req.id)} style={{ padding: '14px', borderRadius: 12, border: 'none', background: '#16a34a', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+              <CheckCircle2 size={16} /> Approve
             </button>
           </div>
-
         </div>
       </motion.div>
     );
   };
 
-  // ── 환자 카드 ─────────────────────────────────────────
   const PatientCard = ({ req }: { req: HospitalRequest }) => {
     const ktas = KTAS_STYLE[req.ktasLevel] ?? KTAS_STYLE[3];
     const bp   = req.patientData.bloodPressure;
@@ -415,7 +572,7 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
 
     return (
       <div
-        onClick={() => setSelectedRequest(req)}
+        onClick={() => { void openPatientDetail(req); }}
         style={{
           background: req.ktasLevel === 1 ? '#fff9f9' : '#fff',
           border: `1px solid ${req.ktasLevel === 1 ? '#fecaca' : '#e2e8f0'}`,
@@ -495,7 +652,7 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
   const AcceptedCard = ({ req }: { req: HospitalRequest }) => {
     const ktas = KTAS_STYLE[req.ktasLevel] ?? KTAS_STYLE[3];
     return (
-      <div style={{
+      <div onClick={() => { void openPatientDetail(req); }} style={{
         background: '#f0fdf4', border: '1px solid #bbf7d0',
         borderRadius: 10, padding: '12px 14px', marginBottom: 8,
       }}>
@@ -516,7 +673,7 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
           {req.paramedicUnit} · {req.paramedicName}
         </div>
         <button
-          onClick={() => setAccepted(prev => prev.filter(r => r.id !== req.id))}
+          onClick={(e) => { e.stopPropagation(); setApproved(prev => prev.filter(r => r.id !== req.id)); }}
           style={{ width: '100%', padding: '8px', borderRadius: 8, border: '1px solid #bbf7d0', background: '#fff', color: '#16a34a', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
           onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = '#dcfce7'; }}
           onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = '#fff'; }}
@@ -534,22 +691,22 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
       {/* 병상 서비스 현황 */}
       <div style={{ borderBottom: '1px solid #f1f5f9', padding: '12px 14px' }}>
         <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 10 }}>병상 서비스 현황</div>
-        {BED_SERVICES.map(b => <BedBar key={b.name} {...b} />)}
+        {hasBedStatusData ? bedServices.map(b => <BedBar key={b.name} {...b} />) : <BedStatusPlaceholder compact />}
       </div>
       {/* 수락된 환자 (이송 중) */}
       <div style={{ padding: '12px 14px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>수락된 환자</div>
-          {acceptedCount > 0 && (
+          {approvedCount > 0 && (
             <span style={{ background: '#16a34a', color: '#fff', fontSize: 10, fontWeight: 700, borderRadius: 10, padding: '1px 7px' }}>
-              {acceptedCount}
+              {approvedCount}
             </span>
           )}
         </div>
-        {accepted.length === 0 ? (
+        {approved.length === 0 ? (
           <div style={{ fontSize: 12, color: '#94a3b8', textAlign: 'center', padding: '12px 0' }}>수락된 환자 없음</div>
         ) : (
-          accepted.map((req) => {
+          approved.map((req) => {
             const extra = DEMO_EXTRA[req.id];
             const timeStr = `${String(req.timestamp.getHours()).padStart(2,'0')}:${String(req.timestamp.getMinutes()).padStart(2,'0')}`;
             return (
@@ -583,7 +740,7 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
           </div>
           <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
             <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />
-            서울대학교병원 응급실 · 실시간 연동 중
+            {hospitalId || 'Hospital'} realtime
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -623,9 +780,9 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
                   {requests.length}
                 </span>
               )}
-              {tab === 'patients' && acceptedCount > 0 && (
+              {tab === 'patients' && approvedCount > 0 && (
                 <span style={{ marginLeft: 6, background: '#16a34a', color: '#fff', fontSize: 10, fontWeight: 700, borderRadius: 10, padding: '1px 7px' }}>
-                  {acceptedCount}
+                  {approvedCount}
                 </span>
               )}
             </button>
@@ -648,14 +805,14 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
                 <div style={{ background: '#16a34a', borderRadius: 10, padding: '12px 14px' }}>
                   <div style={{ fontSize: 10, color: '#bbf7d0', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em' }}>전체 가용 병상</div>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 4, marginTop: 2 }}>
-                    <span style={{ fontSize: 26, fontWeight: 700, color: '#fff', lineHeight: 1.1 }}>{totalAvailable}</span>
-                    <span style={{ fontSize: 14, color: '#bbf7d0', fontWeight: 500 }}>/ {totalBeds}개</span>
+                    <span style={{ fontSize: 26, fontWeight: 700, color: '#fff', lineHeight: 1.1 }}>{hasBedStatusData ? totalAvailable : '-'}</span>
+                    <span style={{ fontSize: 14, color: '#bbf7d0', fontWeight: 500 }}>/ {hasBedStatusData ? totalBeds : '-'}개</span>
                   </div>
                   <div style={{ height: 4, background: 'rgba(255,255,255,0.25)', borderRadius: 2, marginTop: 6 }}>
-                    <div style={{ height: 4, background: '#fff', borderRadius: 2, width: `${(totalAvailable / totalBeds) * 100}%` }} />
+                    <div style={{ height: 4, background: '#fff', borderRadius: 2, width: `${bedAvailabilityPercent}%` }} />
                   </div>
                   <div style={{ fontSize: 10, color: '#bbf7d0', marginTop: 2 }}>
-                    가용률 {Math.round((totalAvailable / totalBeds) * 100)}%
+                    {hasBedStatusData ? `가용률 ${bedAvailabilityPercent}%` : bedStatusMessage}
                   </div>
                 </div>
 
@@ -663,18 +820,18 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
                 <div style={{ background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0', padding: '12px 14px' }}>
                   <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em' }}>응급병상</div>
                   <div style={{ fontSize: 26, fontWeight: 700, color: '#1e293b', lineHeight: 1.1, marginTop: 2 }}>
-                    {BED_SERVICES[0].available}
-                    <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 400 }}>/{BED_SERVICES[0].total}</span>
+                    {hasBedStatusData ? primaryBedService.available : '-'}
+                    <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 400 }}>/{hasBedStatusData ? primaryBedService.total : '-'}</span>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4, marginTop: 6 }}>
-                    {BED_SERVICES.slice(1, 4).map(b => (
+                    {hasBedStatusData ? bedServices.slice(1, 4).map(b => (
                       <div key={b.name} style={{ fontSize: 10, color: '#64748b' }}>
                         {b.name}
                         <span style={{ display: 'block', fontWeight: 600, color: b.available === 0 ? '#ef4444' : '#1e293b', fontSize: 13 }}>
                           {b.available}/{b.total}
                         </span>
                       </div>
-                    ))}
+                    )) : <BedStatusPlaceholder compact />}
                   </div>
                 </div>
 
@@ -690,10 +847,10 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
                 </div>
 
                 {/* 수락된 환자 (이송 중) */}
-                <div style={{ background: '#fff', borderRadius: 10, border: `1px solid ${acceptedCount > 0 ? '#bbf7d0' : '#e2e8f0'}`, padding: '12px 14px' }}>
+                <div style={{ background: '#fff', borderRadius: 10, border: `1px solid ${approvedCount > 0 ? '#bbf7d0' : '#e2e8f0'}`, padding: '12px 14px' }}>
                   <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em' }}>수락됨 · 이송 중</div>
-                  <div style={{ fontSize: 26, fontWeight: 700, color: acceptedCount > 0 ? '#16a34a' : '#1e293b', lineHeight: 1.1, marginTop: 2 }}>
-                    {acceptedCount}
+                  <div style={{ fontSize: 26, fontWeight: 700, color: approvedCount > 0 ? '#16a34a' : '#1e293b', lineHeight: 1.1, marginTop: 2 }}>
+                    {approvedCount}
                   </div>
                   <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 2 }}>도착 대기 중인 환자</div>
                 </div>
@@ -751,9 +908,9 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12 }}>
                 <CheckCircle2 size={13} color="#16a34a" />
                 수락됨 · 이송 중
-                {acceptedCount > 0 && (
+                {approvedCount > 0 && (
                   <span style={{ background: '#16a34a', color: '#fff', fontSize: 10, fontWeight: 700, borderRadius: 10, padding: '1px 7px' }}>
-                    {acceptedCount}
+                    {approvedCount}
                   </span>
                 )}
               </div>
@@ -761,8 +918,8 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
               {/* 필터 */}
               <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
                 {[
-                  { key: 'all',  label: `전체 (${acceptedCount})` },
-                  { key: '1-2', label: `KTAS 1·2 (${accepted.filter(r => r.ktasLevel <= 2).length})` },
+                  { key: 'all',  label: `전체 (${approvedCount})` },
+                  { key: '1-2', label: `KTAS 1·2 (${approved.filter(r => r.ktasLevel <= 2).length})` },
                 ].map(f => (
                   <button
                     key={f.key}
@@ -779,7 +936,7 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
                 ))}
               </div>
 
-              {filteredAccepted.length === 0 ? (
+              {filteredApproved.length === 0 ? (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '60px 0', color: '#94a3b8' }}>
                   <CheckCircle2 size={40} color="#cbd5e1" style={{ marginBottom: 10 }} />
                   <p style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>이송 중인 환자가 없습니다</p>
@@ -787,7 +944,7 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
                 </div>
               ) : (
                 <AnimatePresence>
-                  {filteredAccepted.map(req => (
+                  {filteredApproved.map(req => (
                     <motion.div key={req.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, height: 0 }} layout>
                       <AcceptedCard req={req} />
                     </motion.div>
@@ -817,11 +974,12 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
               <div style={{ padding: '12px 14px' }}>
                 <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>병상 가용 현황</div>
                 <div style={{ textAlign: 'center', padding: '8px 0' }}>
-                  <div style={{ fontSize: 36, fontWeight: 700, color: '#16a34a' }}>{totalAvailable}</div>
-                  <div style={{ fontSize: 12, color: '#64748b' }}>/ {totalBeds} 병상 가용</div>
+                  <div style={{ fontSize: 36, fontWeight: 700, color: '#16a34a' }}>{hasBedStatusData ? totalAvailable : '-'}</div>
+                  <div style={{ fontSize: 12, color: '#64748b' }}>/ {hasBedStatusData ? totalBeds : '-'} 병상 가용</div>
                   <div style={{ height: 6, background: '#f1f5f9', borderRadius: 3, margin: '8px 0' }}>
-                    <div style={{ height: 6, background: '#16a34a', borderRadius: 3, width: `${(totalAvailable / totalBeds) * 100}%` }} />
+                    <div style={{ height: 6, background: '#16a34a', borderRadius: 3, width: `${bedAvailabilityPercent}%` }} />
                   </div>
+                  {!hasBedStatusData && <BedStatusPlaceholder compact />}
                 </div>
               </div>
             </div>
@@ -836,18 +994,18 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
               <div style={{ background: '#16a34a', borderRadius: 10, padding: '12px 14px' }}>
                 <div style={{ fontSize: 10, color: '#bbf7d0', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em' }}>전체 가용 병상</div>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 4, marginTop: 2 }}>
-                  <span style={{ fontSize: 26, fontWeight: 700, color: '#fff' }}>{totalAvailable}</span>
-                  <span style={{ fontSize: 14, color: '#bbf7d0' }}>/{totalBeds}개</span>
+                  <span style={{ fontSize: 26, fontWeight: 700, color: '#fff' }}>{hasBedStatusData ? totalAvailable : '-'}</span>
+                  <span style={{ fontSize: 14, color: '#bbf7d0' }}>/{hasBedStatusData ? totalBeds : '-'}개</span>
                 </div>
                 <div style={{ height: 4, background: 'rgba(255,255,255,0.25)', borderRadius: 2, marginTop: 6 }}>
-                  <div style={{ height: 4, background: '#fff', borderRadius: 2, width: `${(totalAvailable / totalBeds) * 100}%` }} />
+                  <div style={{ height: 4, background: '#fff', borderRadius: 2, width: `${bedAvailabilityPercent}%` }} />
                 </div>
-                <div style={{ fontSize: 10, color: '#bbf7d0', marginTop: 2 }}>가용률 {Math.round((totalAvailable / totalBeds) * 100)}%</div>
+                <div style={{ fontSize: 10, color: '#bbf7d0', marginTop: 2 }}>{hasBedStatusData ? `가용률 ${bedAvailabilityPercent}%` : bedStatusMessage}</div>
               </div>
-              <div style={{ background: '#fff', borderRadius: 10, border: `1px solid ${acceptedCount > 0 ? '#bbf7d0' : '#e2e8f0'}`, padding: '12px 14px' }}>
+              <div style={{ background: '#fff', borderRadius: 10, border: `1px solid ${approvedCount > 0 ? '#bbf7d0' : '#e2e8f0'}`, padding: '12px 14px' }}>
                 <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em' }}>수락됨 · 이송 중</div>
-                <div style={{ fontSize: 26, fontWeight: 700, color: acceptedCount > 0 ? '#16a34a' : '#1e293b', marginTop: 2 }}>
-                  {acceptedCount}<span style={{ fontSize: 14, color: '#94a3b8', fontWeight: 400 }}>명</span>
+                <div style={{ fontSize: 26, fontWeight: 700, color: approvedCount > 0 ? '#16a34a' : '#1e293b', marginTop: 2 }}>
+                  {approvedCount}<span style={{ fontSize: 14, color: '#94a3b8', fontWeight: 400 }}>명</span>
                 </div>
                 <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 2 }}>도착 대기 중인 환자</div>
               </div>
@@ -857,26 +1015,26 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ onLogout }
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <div style={{ background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0', padding: '14px' }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12 }}>병상 서비스별 현황</div>
-                {BED_SERVICES.map(b => <BedBar key={b.name} {...b} />)}
+                {hasBedStatusData ? bedServices.map(b => <BedBar key={b.name} {...b} />) : <BedStatusPlaceholder />}
               </div>
               <div style={{ background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0', padding: '14px' }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12 }}>운영 현황 요약</div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '10px 12px' }}>
                     <div style={{ fontSize: 11, color: '#16a34a', fontWeight: 600, marginBottom: 2 }}>가용 병상</div>
-                    <div style={{ fontSize: 22, fontWeight: 700, color: '#16a34a' }}>{totalAvailable}<span style={{ fontSize: 12, color: '#64748b', fontWeight: 400 }}> / {totalBeds}개</span></div>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: '#16a34a' }}>{hasBedStatusData ? totalAvailable : '-'}<span style={{ fontSize: 12, color: '#64748b', fontWeight: 400 }}> / {hasBedStatusData ? totalBeds : '-'}개</span></div>
                   </div>
                   <div style={{ background: '#fff7ed', borderRadius: 8, padding: '10px 12px' }}>
                     <div style={{ fontSize: 11, color: '#ea580c', fontWeight: 600, marginBottom: 2 }}>대기 중 환자</div>
                     <div style={{ fontSize: 22, fontWeight: 700, color: '#ea580c' }}>{requests.length}<span style={{ fontSize: 12, color: '#64748b', fontWeight: 400 }}> 건</span></div>
                   </div>
-                  {BED_SERVICES.some(b => b.available === 0) && (
+                  {hasBedStatusData && bedServices.some(b => b.available === 0) && (
                     <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '10px 12px' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#dc2626', fontWeight: 600, marginBottom: 4 }}>
                         <AlertCircle size={13} /> 운영 주의
                       </div>
                       <p style={{ fontSize: 11, color: '#991b1b' }}>
-                        {BED_SERVICES.filter(b => b.available === 0).map(b => b.name).join(' · ')} 병상 포화 상태. 신규 중증 환자 수용 제한 권고.
+                        {bedServices.filter(b => b.available === 0).map(b => b.name).join(' · ')} 병상 포화 상태. 신규 중증 환자 수용 제한 권고.
                       </p>
                     </div>
                   )}

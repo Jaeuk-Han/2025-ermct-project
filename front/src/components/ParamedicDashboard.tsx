@@ -156,6 +156,26 @@ function formatMinutes(value?: number) {
 }
 
 
+function maskDisplayName(name?: string | null) {
+  const trimmed = name?.trim();
+  if (!trimmed) return null;
+  if (trimmed.length <= 1) return '*';
+  if (trimmed.length === 2) return trimmed[0] + '*';
+  return trimmed[0] + '*'.repeat(trimmed.length - 2) + trimmed[trimmed.length - 1];
+}
+
+function parseOptionalInt(value?: string | null) {
+  if (!value?.trim()) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseOptionalNumber(value?: string | null) {
+  if (!value?.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function buildRoutePolylines(kakaoMaps: any, path: any[], color: string) {
   const halo = new kakaoMaps.Polyline({
     path,
@@ -603,35 +623,148 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     setView('confirm');
     setRequestStatus('waiting');
 
-    // 1. Get current user ID
     const { data: { user } } = await supabase.auth.getUser();
-    
-    // 2. Create Transfer Request in DB
+    const paramedicId = user?.id;
+    const ktasLevel = patientData.ktasLevel;
+    const recommendationCase = routingResponse?.case ?? null;
+    const recommendationComplaintId = recommendationCase?.complaint_id;
+    const complaintId =
+      typeof recommendationComplaintId === 'number' && Number.isFinite(recommendationComplaintId)
+        ? recommendationComplaintId
+        : null;
+    const complaintLabel = recommendationCase?.complaint_label || patientData.symptoms || null;
+    const vitalsPulse = parseOptionalInt(patientData.pulse);
+    const vitalsResp = parseOptionalInt(patientData.respiration);
+    const vitalsSpo2 = parseOptionalInt(patientData.oxygenSaturation);
+    const vitalsTemp = parseOptionalNumber(patientData.temperature);
+    const routeEtaMin = routeSummary?.durationMin ?? hospital.eta ?? null;
+    const routeDistanceKm = routeSummary?.distanceKm ?? hospital.distance ?? null;
+    const displayName = maskDisplayName(patientInfo.name);
+    const age = parseOptionalInt(patientInfo.age);
+    const gender = patientInfo.gender || null;
+    const ktasLabel = ktasLevel != null ? 'KTAS ' + ktasLevel : null;
+    const ktasName = ktasLabel;
+    const summary = patientData.symptoms
+      ? [
+          patientInfo.age ? patientInfo.age + ' years' : null,
+          gender,
+          patientData.symptoms,
+          patientData.consciousness,
+        ].filter(Boolean).join(' / ')
+      : null;
+    const recommendationReason = hospital.reasonSummary || null;
+    const recommendationSnapshot = {
+      selected_hospital: {
+        id: hospital.id,
+        name: hospital.name,
+        address: hospital.address ?? null,
+        phone: hospital.phoneNumber ?? null,
+        eta_min: routeEtaMin,
+        distance_km: routeDistanceKm,
+        available_beds: hospital.availableBeds,
+        coverage_level: hospital.coverageLevel ?? null,
+        coverage_score: hospital.coverageScore ?? null,
+        reason_summary: hospital.reasonSummary ?? null,
+      },
+      candidates: hospitals.map((candidate) => ({
+        id: candidate.id,
+        name: candidate.name,
+        eta_min: candidate.eta ?? null,
+        distance_km: candidate.distance ?? null,
+        available_beds: candidate.availableBeds,
+        coverage_level: candidate.coverageLevel ?? null,
+        coverage_score: candidate.coverageScore ?? null,
+        reason_summary: candidate.reasonSummary ?? null,
+      })),
+      routing_case: routingResponse?.case ?? null,
+    };
+
+    const { data: sessionDebug } = await supabase.auth.getSession();
+    const { data: userDebug } = await supabase.auth.getUser();
+    const supabaseLocalStorageKeys = Object.keys(localStorage).filter((key) =>
+      key.toLowerCase().includes('supabase'),
+    );
+    console.log('[auth-debug] before transfer_requests insert', {
+      userId: userDebug.user?.id ?? null,
+      sessionExists: Boolean(sessionDebug.session),
+      accessTokenExists: Boolean(sessionDebug.session?.access_token),
+      supabaseLocalStorageKeys,
+    });
+
     const { data, error } = await supabase
-        .from('transfer_requests')
-        .insert({
-            hospital_id: hospital.id,
-            paramedic_id: user?.id, 
-            patient_age: 45, // Mock
-            patient_gender: 'Male', // Mock
-            symptoms: patientData.symptoms,
-            ktas_level: patientData.ktasLevel,
-            vitals_bp: patientData.bloodPressure,
-            vitals_resp: parseInt(patientData.respiration || '0'),
-            vitals_pulse: parseInt(patientData.pulse || '0'),
-            status: 'waiting'
-        })
-        .select()
-        .single();
+      .from('transfer_requests')
+      .insert({
+        hospital_id: hospital.id,
+        paramedic_id: paramedicId,
+        status: 'waiting',
+        ktas_level: ktasLevel,
+        ktas_label: ktasLabel,
+        symptoms: patientData.symptoms || null,
+        consciousness: patientData.consciousness || null,
+        vitals_bp: patientData.bloodPressure || null,
+        vitals_pulse: vitalsPulse,
+        vitals_resp: vitalsResp,
+        vitals_spo2: vitalsSpo2,
+        vitals_temp: vitalsTemp,
+        route_eta_min: routeEtaMin,
+        route_distance_km: routeDistanceKm,
+        paramedic_name: userName || null,
+        paramedic_unit: '119',
+        paramedic_contact: null,
+      })
+      .select('id')
+      .single();
 
     if (error) {
-        console.error("Supabase insert error:", error);
-        // Fallback simulation for demo if DB isn't set up
-        setTimeout(() => {
-            setRequestStatus('approved');
-        }, 2500);
-    } else if (data) {
-        setCurrentRequestId(data.id);
+      console.error('Supabase transfer_requests insert error:', error);
+      setTimeout(() => {
+        setRequestStatus('approved');
+      }, 2500);
+      return;
+    }
+
+    if (data?.id) {
+      setCurrentRequestId(data.id);
+
+      const { error: patientCaseError } = await supabase
+        .from('patient_cases')
+        .insert({
+          transfer_request_id: data.id,
+          paramedic_id: paramedicId,
+          display_name: displayName,
+          age,
+          gender,
+          symptoms: patientData.symptoms || null,
+          extra_note: null,
+          summary,
+          ktas_level: ktasLevel,
+          ktas_label: ktasLabel,
+          ktas_name: ktasName,
+          complaint_id: complaintId,
+          complaint_label: complaintLabel,
+          consciousness: patientData.consciousness || null,
+          vitals_bp: patientData.bloodPressure || null,
+          vitals_pulse: vitalsPulse,
+          vitals_resp: vitalsResp,
+          vitals_spo2: vitalsSpo2,
+          vitals_temp: vitalsTemp,
+          existing_hospital: patientData.existingHospital || null,
+          assigned_hospital_id: hospital.id,
+          assigned_hospital_name: hospital.name,
+          assigned_hospital_address: hospital.address || null,
+          assigned_hospital_phone: hospital.phoneNumber || null,
+          origin_lat: userLocation?.lat ?? null,
+          origin_lon: userLocation?.lon ?? null,
+          route_eta_min: routeEtaMin,
+          route_distance_km: routeDistanceKm,
+          recommendation_reason: recommendationReason,
+          recommendation_snapshot: recommendationSnapshot,
+          status: 'waiting',
+        });
+
+      if (patientCaseError) {
+        console.error('Supabase patient_cases insert error:', patientCaseError);
+      }
     }
   };
 

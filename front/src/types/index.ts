@@ -1,4 +1,12 @@
-export type UserRole = 'paramedic' | 'hospital' | null;
+export type ProfileRole = 'paramedic' | 'hospital';
+export type UserRole = ProfileRole | null;
+export type TransferStatus =
+  | 'waiting'
+  | 'approved'
+  | 'rejected'
+  | 'transferring'
+  | 'completed'
+  | 'cancelled';
 
 export interface PatientData {
   consciousness: string;
@@ -35,7 +43,7 @@ export interface TransferRequest {
   patientData: PatientData;
   hospitalId: string;
   hospitalName: string;
-  status: 'pending' | 'accepted' | 'rejected';
+  status: TransferStatus;
   timestamp: Date;
   paramedicName: string;
   paramedicUnit: string;
@@ -50,6 +58,6 @@ export interface HospitalRequest {
   paramedicUnit: string;
   paramedicName: string;
   timestamp: Date;
-  status: 'pending' | 'accepted' | 'rejected';
+  status: TransferStatus;
   patientData: PatientData;
 }
