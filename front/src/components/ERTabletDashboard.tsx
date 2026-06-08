@@ -207,6 +207,7 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ hospitalId
   const [isLoading,       setIsLoading]       = useState(false);
   const [currentTime,     setCurrentTime]     = useState('');
   const [ktasFilter,      setKtasFilter]      = useState<'all' | '1-2'>('all');
+  const [hospitalDisplayName, setHospitalDisplayName] = useState(hospitalId || 'Hospital');
 
   // 시계
   useEffect(() => {
@@ -218,6 +219,41 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ hospitalId
     const id = setInterval(tick, 10_000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    let isActive = true;
+    const fallbackName = hospitalId || 'Hospital';
+    setHospitalDisplayName(fallbackName);
+
+    if (!hospitalId || demoAuthEnabled) {
+      return () => { isActive = false; };
+    }
+
+    const fetchHospitalName = async () => {
+      const { data, error } = await supabase
+        .from('hospitals')
+        .select('name')
+        .eq('id', hospitalId)
+        .maybeSingle();
+
+      if (!isActive) {
+        return;
+      }
+
+      if (error) {
+        console.error('Failed to load hospital name:', error);
+        setHospitalDisplayName(fallbackName);
+        return;
+      }
+
+      const hospitalName = typeof data?.name === 'string' ? data.name.trim() : '';
+      setHospitalDisplayName(hospitalName || fallbackName);
+    };
+
+    void fetchHospitalName();
+
+    return () => { isActive = false; };
+  }, [hospitalId]);
 
   // 데이터 패치
   useEffect(() => {
@@ -327,7 +363,10 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ hospitalId
     setSelectedRequest(null);
     setActiveTab('patients'); // 수락 후 대기 환자 탭으로 이동
     if (!demoAuthEnabled) {
-      await supabase.from('transfer_requests').update({ status: 'approved' }).eq('id', id);
+      await supabase.from('transfer_requests').update({
+        status: 'approved',
+        approved_at: new Date().toISOString(),
+      }).eq('id', id);
     }
   };
   const handleReject = async (id: string, reason: string) => {
@@ -335,7 +374,15 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ hospitalId
     setRejectModal(null);
     setSelectedRequest(null); // 상세 뷰가 열려있으면 닫기
     if (!demoAuthEnabled) {
-      await supabase.from('transfer_requests').update({ status: 'rejected', rejection_reason: reason }).eq('id', id);
+      const rejectedUpdate: { status: 'rejected'; rejected_at: string; rejection_reason?: string } = {
+        status: 'rejected',
+        rejected_at: new Date().toISOString(),
+      };
+      const trimmedReason = reason.trim();
+      if (trimmedReason) {
+        rejectedUpdate.rejection_reason = trimmedReason;
+      }
+      await supabase.from('transfer_requests').update(rejectedUpdate).eq('id', id);
     }
   };
 
@@ -740,7 +787,7 @@ export const ERTabletDashboard: React.FC<ERTabletDashboardProps> = ({ hospitalId
           </div>
           <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
             <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />
-            {hospitalId || 'Hospital'} realtime
+            {hospitalDisplayName} realtime
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
