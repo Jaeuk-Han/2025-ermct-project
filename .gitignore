@@ -51,4 +51,3 @@ dist/
 build/
 *.egg-info/
 data/ktas_guideline_index.json
-data/rag_performance_test.csv
