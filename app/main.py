@@ -5,7 +5,7 @@ from io import BytesIO
 from fastapi import FastAPI, Query, Response, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
-from typing import Dict, List, Set, Optional, Sequence, Tuple
+from typing import Dict, List, Literal, Set, Optional, Sequence, Tuple
 from fastapi import UploadFile, File # UploadFile, File 추가
 # 뒤에 ', get_whisper_model' 을 꼭 붙여야 합니다!
 from app.stt_cleaner import (
@@ -70,6 +70,7 @@ from app.routers.reservations import router as reservations_router
 
 class TextKTASRequest(BaseModel):
     text: str
+    ktas_method: Literal["rule_based", "rag_based"] = "rule_based"
 
 # 3단계 import
 from .distance_logic import calculate_all_distances_async, get_top3, get_tmap_route_async
@@ -514,6 +515,24 @@ def _build_stage1_response(stage1_result: dict) -> RoutingCandidateResponse:
         case=routing_case,
         hospitals=[],
         stt_vitals=stt_vitals,
+        ktas_method=stage1_result.get("ktas_method")
+        if isinstance(stage1_result, dict)
+        else None,
+        confidence=stage1_result.get("confidence")
+        if isinstance(stage1_result, dict)
+        else None,
+        evidence=stage1_result.get("evidence", [])
+        if isinstance(stage1_result, dict)
+        else [],
+        ktas_options=stage1_result.get("ktas_options")
+        if isinstance(stage1_result, dict)
+        else None,
+        fallback_from=stage1_result.get("fallback_from")
+        if isinstance(stage1_result, dict)
+        else None,
+        fallback_reason=stage1_result.get("fallback_reason")
+        if isinstance(stage1_result, dict)
+        else None,
     )
 
 
@@ -1755,7 +1774,10 @@ async def get_route_path(req: RoutePathRequest = Body(...)):
 # 파일 맨 끝에 붙여넣으세요
 
 @app.post("/api/ktas/predict-audio", response_model=RoutingCandidateResponse)
-async def predict_audio(audio: UploadFile = File(...)):
+async def predict_audio(
+    audio: UploadFile = File(...),
+    ktas_method: Literal["rule_based", "rag_based"] = Query("rule_based"),
+):
     """
     [Stage 1 + Stage 2 통합]
     """
@@ -1780,7 +1802,7 @@ async def predict_audio(audio: UploadFile = File(...)):
     # 1. [Stage 1] 음성 엔진 실행
     print("\n[Stage 1] 음성 분석 및 KTAS 분류 중...")
     try:
-        stage1_result = ktas_from_audio(audio_buffer)
+        stage1_result = ktas_from_audio(audio_buffer, ktas_method=ktas_method)
     except InvalidSTTAudioError as exc:
         raise HTTPException(
             status_code=400,
@@ -1834,7 +1856,7 @@ async def predict_text(req: TextKTASRequest = Body(...)):
     음성 파이프라인과 동일한 decide_ktas_1to3 로직을 사용.
     """
     print("\n[Stage 1] 텍스트 분석 및 KTAS 분류 중...")
-    stage1_result = ktas_from_text(req.text)
+    stage1_result = ktas_from_text(req.text, ktas_method=req.ktas_method)
     return _build_stage1_response(stage1_result)
 
     payload_dict = build_stage2_payload(stage1_result)

@@ -1,8 +1,18 @@
 import json
+import logging
 import os
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 from dotenv import load_dotenv
 from openai import OpenAI
+
+from app.ktas_normalizer import (
+    NormalizedKTASResult,
+    normalize_rag_based_result,
+    normalize_rule_based_result,
+)
+from app.ktas_rag import KtasVectorStore, classify_ktas_rag
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -442,24 +452,89 @@ def classify_ktas(sbar: dict) -> dict:
 def run_ktas_engine(
     clean_text: str,
     raw_hospital=None,
-    final_hospital=None
+    final_hospital=None,
+    use_rag: bool = False,
+    rag_vector_store: Optional[KtasVectorStore] = None,
 ) -> Dict[str, Any]:
+    logger.info(
+        "[KTAS] engine start use_rag=%s rag_vector_store_loaded=%s",
+        use_rag,
+        rag_vector_store is not None,
+    )
+
     llm_output = call_llm2_for_sbar(clean_text)
     sbar = parse_sbar_json(llm_output)
 
-    ktas_result = classify_ktas(sbar)
-    llm_hospital = sbar.get("B", {}).get("followup_hospital")
+    normalized: NormalizedKTASResult
+    fallback_reason: str | None = None
 
-    return {
+    if use_rag:
+        try:
+            if rag_vector_store is None:
+                raise RuntimeError("RAG index is not loaded.")
+            logger.info("[KTAS] running rag_based classifier")
+            ktas_options = classify_ktas_rag(clean_text, sbar, rag_vector_store)
+            normalized = normalize_rag_based_result(
+                ktas_options=ktas_options,
+                sbar=sbar,
+                raw_hospital=raw_hospital,
+                final_hospital=final_hospital,
+            )
+            logger.info(
+                "[KTAS] rag_based classifier succeeded ktas=%s confidence=%s options=%s",
+                normalized.ktas_level,
+                normalized.confidence,
+                len(normalized.ktas_options or []),
+            )
+        except Exception as exc:
+            fallback_reason = f"RAG fallback: {exc}"
+            logger.warning(
+                "[KTAS] rag_based classifier failed; fallback to rule_based reason=%s",
+                fallback_reason,
+            )
+            ktas_result = classify_ktas(sbar)
+            normalized = normalize_rule_based_result(
+                ktas_result=ktas_result,
+                sbar=sbar,
+                raw_hospital=raw_hospital,
+                final_hospital=final_hospital,
+                fallback_from="rag_based",
+                fallback_reason=fallback_reason,
+            )
+    else:
+        ktas_result = classify_ktas(sbar)
+        normalized = normalize_rule_based_result(
+            ktas_result=ktas_result,
+            sbar=sbar,
+            raw_hospital=raw_hospital,
+            final_hospital=final_hospital,
+        )
+
+    result = {
         "text": clean_text,
         "sbar": sbar,
-        "ktas": ktas_result["ktas"],
-        "reason": ktas_result["reason"],
-        "chief_complaint": sbar.get("S", {}).get("chief_complaint"),
+        "ktas": normalized.ktas_level,
+        "reason": normalized.reason,
+        "chief_complaint": normalized.chief_complaint,
         "requirement": sbar.get("S", {}).get("requirement"),
-        "followup_hospital_raw": raw_hospital or llm_hospital,
-        "followup_hospital": final_hospital or raw_hospital or llm_hospital,
+        "followup_hospital_raw": raw_hospital
+        or (sbar.get("B", {}) or {}).get("followup_hospital"),
+        "followup_hospital": normalized.hospital_followup,
+        "ktas_method": normalized.method,
+        "method": normalized.method,
+        "confidence": normalized.confidence,
+        "evidence": normalized.evidence,
+        "ktas_options": normalized.ktas_options,
+        "fallback_from": normalized.fallback_from,
+        "fallback_reason": normalized.fallback_reason,
     }
+    logger.info(
+        "[KTAS] engine result method=%s ktas=%s fallback_from=%s",
+        result.get("ktas_method") or result.get("method"),
+        result.get("ktas") or result.get("ktas_level"),
+        result.get("fallback_from"),
+    )
+    return result
 
 
 # =====================================================
@@ -485,4 +560,9 @@ if __name__ == "__main__":
         final_hospital=None
     )
 
-    print(result)
+    logger.info(
+        "[KTAS] final result summary ktas=%s method=%s fallback_from=%s",
+        result.get("ktas") or result.get("ktas_level"),
+        result.get("ktas_method") or result.get("method"),
+        result.get("fallback_from"),
+    )

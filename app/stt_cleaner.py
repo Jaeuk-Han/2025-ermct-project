@@ -4,13 +4,18 @@
 import os
 import re
 import tempfile
-from typing import Union, IO
+import logging
+from pathlib import Path
+from typing import Optional, Union, IO
 from difflib import SequenceMatcher, get_close_matches
 
 import whisper
 from openai import OpenAI
 from dotenv import load_dotenv
 from app.ktas_engine import run_ktas_engine
+from app.ktas_rag import KtasVectorStore
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -19,10 +24,18 @@ os.environ["WHISPER_CACHE_DIR"] = r"C:\whisper_cache"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    print("⚠️ 경고: .env 파일에 OPENAI_API_KEY가 없습니다.")
+    logger.warning("[CONFIG] OPENAI_API_KEY is not set")
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 whisper_model = None
+
+RAG_VECTOR_STORE: Optional[KtasVectorStore] = None
+RAG_INDEX_PATH = Path(__file__).resolve().parent.parent / "data" / "ktas_guideline_index.json"
+if RAG_INDEX_PATH.exists():
+    try:
+        RAG_VECTOR_STORE = KtasVectorStore.load(RAG_INDEX_PATH)
+    except Exception as exc:
+        logger.warning("[KTAS] RAG vector store load failed reason=%s", exc)
 
 INVALID_STT_PATTERNS = [
     "시청해주셔서감사합니다",
@@ -79,9 +92,9 @@ def get_openai_client() -> OpenAI:
 def get_whisper_model():
     global whisper_model
     if whisper_model is None:
-        print("[INFO] Whisper large-v3 모델 로딩 중...")
+        logger.info("[STT] whisper model loading model=large-v3")
         whisper_model = whisper.load_model("large-v3")
-        print("[INFO] Whisper large-v3 로딩 완료.")
+        logger.info("[STT] whisper model loaded model=large-v3")
     return whisper_model
 
 
@@ -102,8 +115,7 @@ def speech_to_text(audio_source: Union[str, IO]) -> str:
                 pass
             tmp.write(audio_source.read())
             audio_path = tmp.name
-        print("[stt] temporary audio path:", audio_path)
-        print("[stt] temporary audio bytes:", os.path.getsize(audio_path))
+        logger.debug("[STT] temporary audio prepared bytes=%s", os.path.getsize(audio_path))
 
     try:
         result = model.transcribe(audio_path, language="ko")
@@ -347,7 +359,7 @@ def llm_clean_text(raw_text: str) -> str:
         return response.choices[0].message.content.strip()
 
     except Exception as e:
-        print("\n[LLM ERROR]", str(e))
+        logger.warning("[STT] text cleanup failed error_type=%s", type(e).__name__)
         return raw_text
 
 
@@ -492,12 +504,14 @@ def extract_followup_hospital(text: str):
     return None
 
 
-def transcribe_clean_and_match_hospital(audio_source: Union[str, IO]) -> dict:
-    print("[INFO] 음성 인식 중...")
+def transcribe_clean_and_match_hospital(
+    audio_source: Union[str, IO],
+    ktas_method: str = "rule_based",
+) -> dict:
+    logger.info("[STT] transcription started")
     raw_text = speech_to_text(audio_source)
 
-    print("\n[STT 결과]")
-    print(raw_text)
+    logger.debug("[STT] transcription completed text_length=%s", len(raw_text or ""))
 
     if is_likely_stt_hallucination(raw_text):
         raise InvalidSTTAudioError(
@@ -509,8 +523,7 @@ def transcribe_clean_and_match_hospital(audio_source: Union[str, IO]) -> dict:
     clean_text = llm_clean_text(raw_text)
     
 
-    print("\n[LLM 보정 후 문장]")
-    print(clean_text)
+    logger.debug("[STT] text cleanup completed text_length=%s", len(clean_text or ""))
 
     if is_likely_stt_hallucination(clean_text) or is_repetition_amplified(raw_text, clean_text):
         raise InvalidSTTAudioError(
@@ -522,14 +535,24 @@ def transcribe_clean_and_match_hospital(audio_source: Union[str, IO]) -> dict:
     raw_hospital = extract_followup_hospital(clean_text)
     final_hospital = best_match_hospital(raw_hospital, SEOUL_HOSPITAL_DB)
 
-    print("\n[병원 매칭 결과]")
-    print(f"추출 병원명: {raw_hospital or '정보 없음'}")
-    print(f"정규화 병원명: {final_hospital or '정보 없음'}")
+    logger.debug(
+        "[STT] hospital extraction completed has_raw_hospital=%s has_final_hospital=%s",
+        bool(raw_hospital),
+        bool(final_hospital),
+    )
+
+    logger.info(
+        "[KTAS] request prepared ktas_method=%s rag_vector_store_loaded=%s",
+        ktas_method,
+        RAG_VECTOR_STORE is not None,
+    )
 
     result = run_ktas_engine(
         clean_text,
         raw_hospital,
-        final_hospital
+        final_hospital,
+        use_rag=ktas_method == "rag_based",
+        rag_vector_store=RAG_VECTOR_STORE,
     )
 
     return result
@@ -542,15 +565,29 @@ def transcribe_clean_and_match_hospital(audio_source: Union[str, IO]) -> dict:
      }
 
 
-def ktas_from_audio(audio_source: Union[str, IO]) -> dict:
-    return transcribe_clean_and_match_hospital(audio_source)
+def ktas_from_audio(
+    audio_source: Union[str, IO],
+    ktas_method: str = "rule_based",
+) -> dict:
+    return transcribe_clean_and_match_hospital(audio_source, ktas_method=ktas_method)
 
 
-def ktas_from_text(text: str) -> dict:
+def ktas_from_text(text: str, ktas_method: str = "rule_based") -> dict:
     clean_text = llm_clean_text(text)
     raw_hospital = extract_followup_hospital(clean_text)
     final_hospital = best_match_hospital(raw_hospital, SEOUL_HOSPITAL_DB)
-    return run_ktas_engine(clean_text, raw_hospital, final_hospital)
+    logger.info(
+        "[KTAS] request prepared ktas_method=%s rag_vector_store_loaded=%s",
+        ktas_method,
+        RAG_VECTOR_STORE is not None,
+    )
+    return run_ktas_engine(
+        clean_text,
+        raw_hospital,
+        final_hospital,
+        use_rag=ktas_method == "rag_based",
+        rag_vector_store=RAG_VECTOR_STORE,
+    )
 
 
 def build_stage2_payload(stage1_result: dict) -> dict:
@@ -570,5 +607,9 @@ if __name__ == "__main__":
     audio_path = "test.m4a"
     result = transcribe_clean_and_match_hospital(audio_path)
 
-    print("\n===== 최종 결과 =====")
-    print(result)
+    logger.info(
+        "[KTAS] final result summary ktas=%s method=%s fallback_from=%s",
+        result.get("ktas") or result.get("ktas_level"),
+        result.get("ktas_method") or result.get("method"),
+        result.get("fallback_from"),
+    )

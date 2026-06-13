@@ -405,6 +405,13 @@ class RoutingCandidateResponse(BaseModel):
         description="음성 인식(STT)에서 추출된 활력징후/AVPU 요약 (keys: avpu, rr, bp_sys, bp_dia, hr, bt, spo2 등)",
     )
 
+    ktas_method: Optional[str] = None
+    confidence: Optional[float] = None
+    evidence: List[str] = Field(default_factory=list)
+    ktas_options: Optional[List[Dict[str, Any]]] = None
+    fallback_from: Optional[str] = None
+    fallback_reason: Optional[str] = None
+
 class NearestRoutingRequest(RoutingCandidateResponse):
     user_lat: float
     user_lon: float

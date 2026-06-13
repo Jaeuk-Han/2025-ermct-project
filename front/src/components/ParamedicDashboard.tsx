@@ -40,6 +40,7 @@ import {
   routeFromKTAS,
   routeNearest,
   routePath,
+  KtasMethod,
   KtasRoutePayload,
   RoutingCandidateResponse,
   RoutingCandidateHospital,
@@ -80,6 +81,17 @@ type NormalizedKtasCase = {
   complaint_label?: string | null;
   corrected_text?: string | null;
 };
+
+const summarizeKtasResponse = (result: RoutingCandidateResponse) => ({
+  ktas_method: result.ktas_method,
+  ktas: result.case?.ktas,
+  confidence: result.confidence,
+  evidence_count: result.evidence?.length ?? 0,
+  ktas_options_count: result.ktas_options?.length ?? 0,
+  fallback_from: result.fallback_from,
+  hospital_count: result.hospitals?.length ?? 0,
+  has_stt_vitals: Boolean(result.stt_vitals),
+});
 
 const DEFAULT_MAP_CENTER = { lat: 37.4200, lon: 127.1268 };
 const MIN_AUDIO_BLOB_BYTES = 10000;
@@ -237,6 +249,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const [isListening, setIsListening] = useState(false);
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
   const [ktasLocked, setKtasLocked] = useState(false); // 백엔드에서 받은 KTAS가 있으면 자동 계산을 잠금
+  const [ktasMethod, setKtasMethod] = useState<KtasMethod>('rule_based');
   
   const [patientData, setPatientData] = useState<PatientData>({
     consciousness: 'Alert',
@@ -256,6 +269,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const [requestStatus, setRequestStatus] = useState<'waiting' | 'approved' | 'rejected'>('waiting');
   const [currentRequestId, setCurrentRequestId] = useState<string | null>(null);
   const [routingResponse, setRoutingResponse] = useState<RoutingCandidateResponse | null>(null);
+  const [ktasStage1Response, setKtasStage1Response] = useState<RoutingCandidateResponse | null>(null);
   const [pendingKtasCase, setPendingKtasCase] = useState<NormalizedKtasCase | null>(null);
   const [userLocation, setUserLocation] = useState<{ lat: number; lon: number } | null>(null);
   const [locationRequested, setLocationRequested] = useState(false);
@@ -387,22 +401,31 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     };
 
     if (!Number.isFinite(payload.ktas_level) || payload.ktas_level < 1) {
-      console.error("[route/seoul] invalid ktas_level", payload);
+      console.error("[route/seoul] invalid ktas_level", {
+        ktas_level: payload.ktas_level,
+        has_chief_complaint: Boolean(payload.chief_complaint),
+        has_hospital_followup: Boolean(payload.hospital_followup),
+        has_location: Boolean(payload.user_lat && payload.user_lon),
+      });
       return null;
     }
 
     if (!chiefComplaint) {
       console.error("[route/seoul] invalid chief_complaint", {
-        payload,
-        symptoms: patientData.symptoms,
-        caseOverride,
-        routingCase: routingResponse?.case,
+        ktas_level: payload.ktas_level,
+        has_symptoms: Boolean(patientData.symptoms),
+        has_case_override: Boolean(caseOverride),
+        has_routing_case: Boolean(routingResponse?.case),
       });
       return null;
     }
 
     if (payload.user_lat == null || payload.user_lon == null) {
-      console.warn("[route/seoul] missing location; requesting base recommendations without nearest sorting", payload);
+      console.warn("[route/seoul] missing location; requesting base recommendations without nearest sorting", {
+        ktas_level: payload.ktas_level,
+        has_chief_complaint: Boolean(payload.chief_complaint),
+        has_hospital_followup: Boolean(payload.hospital_followup),
+      });
     }
 
     return payload;
@@ -420,7 +443,12 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   ): Promise<RoutingCandidateResponse | null> => {
     const requestKey = JSON.stringify(payload);
     if (routeRequestInFlightKeyRef.current === requestKey) {
-      console.warn("[route/seoul] duplicate request skipped", payload);
+      console.warn("[route/seoul] duplicate request skipped", {
+        ktas_level: payload.ktas_level,
+        has_chief_complaint: Boolean(payload.chief_complaint),
+        has_hospital_followup: Boolean(payload.hospital_followup),
+        has_location: Boolean(payload.user_lat && payload.user_lon),
+      });
       return null;
     }
 
@@ -479,14 +507,20 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     coordinates?: { lat: number; lon: number } | null,
   ): Promise<RoutingCandidateResponse | null> => {
     const payload = buildKtasRoutePayload(coordinates ?? userLocation, caseOverride ?? pendingKtasCase);
-    console.log("[recommend] route payload", payload);
+    console.log("[recommend] route payload summary", {
+      has_payload: Boolean(payload),
+      ktas_level: payload?.ktas_level,
+      has_chief_complaint: Boolean(payload?.chief_complaint),
+      has_hospital_followup: Boolean(payload?.hospital_followup),
+      has_location: Boolean(payload?.user_lat && payload?.user_lon),
+    });
 
     if (!payload) {
       return null;
     }
 
     const routeResult = await requestRouteFromKTAS(payload);
-    console.log("[recommend] route response", routeResult);
+    console.log("[recommend] route response summary", summarizeKtasResponse(routeResult));
 
     if (routeResult) {
       setRoutingResponse(routeResult);
@@ -660,7 +694,11 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
           filter: `id=eq.${currentRequestId}`
         },
         (payload) => {
-          console.log('Update received:', payload);
+          console.log('Update received summary:', {
+            eventType: payload.eventType,
+            requestId: payload.new?.id,
+            status: payload.new?.status,
+          });
           if (payload.new.status === 'approved') {
             setRequestStatus('approved');
           } else if (payload.new.status === 'rejected') {
@@ -690,8 +728,14 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
   const applyBackendResult = useCallback((result: RoutingCandidateResponse) => {
     const normalizedCase = normalizePredictResult(result);
-    console.log("[flow] normalized case", normalizedCase);
+    console.log("[flow] normalized case summary", {
+      ktas: normalizedCase.ktas,
+      complaint_id: normalizedCase.complaint_id,
+      has_complaint_label: Boolean(normalizedCase.complaint_label),
+      has_corrected_text: Boolean(normalizedCase.corrected_text),
+    });
     setPendingKtasCase(normalizedCase);
+    setKtasStage1Response(result);
     setRoutingResponse(null);
     setHospitals([]);
     const vitals = result.stt_vitals || {};
@@ -717,7 +761,12 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
         oxygenSaturation: spo2 != null ? String(spo2) : prev.oxygenSaturation,
         temperature: bt != null ? String(bt) : prev.temperature,
       };
-      console.log("[flow] final patientData", next);
+      console.log("[flow] final patientData prepared", {
+        has_symptoms: Boolean(next.symptoms),
+        has_vitals: Boolean(next.respiration || next.pulse || next.bloodPressure),
+        ktas_method: result.ktas_method,
+        ktas: next.ktasLevel,
+      });
       return next;
     });
     if (result.case?.ktas != null) {
@@ -804,14 +853,19 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
           const formData = new FormData();
           formData.append("audio", file);
 
-          const result = await predictAudio(formData);
-          console.log("[flow:voice] predict-audio response", result);
-          console.log("[flow:voice] case", result?.case);
+          const result = await predictAudio(formData, ktasMethod);
+          console.log("[flow:voice] predict-audio response summary", summarizeKtasResponse(result));
           console.log("[flow:voice] ktas", result?.case?.ktas);
           console.log("[flow:voice] complaint_id", result?.case?.complaint_id);
-          console.log("[flow:voice] complaint_label", result?.case?.complaint_label);
+          console.log("[flow:voice] has_complaint_label", Boolean(result?.case?.complaint_label));
           applyBackendResult(result);
-          console.log("[flow:voice] normalized case", normalizePredictResult(result));
+          const voiceNormalizedCase = normalizePredictResult(result);
+          console.log("[flow:voice] normalized case summary", {
+            ktas: voiceNormalizedCase.ktas,
+            complaint_id: voiceNormalizedCase.complaint_id,
+            has_complaint_label: Boolean(voiceNormalizedCase.complaint_label),
+            has_corrected_text: Boolean(voiceNormalizedCase.corrected_text),
+          });
           console.log("[flow:voice] saved case; waiting for recommend button");
           setView("review");
         } catch (err) {
@@ -1019,6 +1073,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     setView('input');
     setKtasLocked(false);
     setRoutingResponse(null);
+    setKtasStage1Response(null);
     setPendingKtasCase(null);
     setHospitals([]);
     setUserLocation(null);
@@ -1659,6 +1714,26 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
               {/* Voice Input Button + Stop */}
               <div className="emt-area-voice flex flex-col gap-3">
+                 <div className="mb-5 rounded-2xl border border-gray-200 bg-white px-6 py-5 shadow-sm">
+                    <div>
+                    <label className="mb-3 block text-left text-sm font-semibold text-gray-700">
+                      KTAS 산출 방식
+                    </label>
+                    <div className="relative w-full">
+                    <select
+                      value={ktasMethod}
+                      onChange={(e) => setKtasMethod(e.target.value as KtasMethod)}
+                      className="w-full appearance-none rounded-xl border border-gray-200 bg-white px-4 py-3 pr-10 text-base font-medium text-gray-900 transition-all focus:border-[#00796B] focus:outline-none focus:ring-2 focus:ring-[#00796B]/20"
+                    >
+                      <option value="rule_based">규칙 기반 KTAS</option>
+                      <option value="rag_based">RAG 기반 KTAS</option>
+                    </select>
+                    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-gray-500">
+                      <svg className="h-4 w-4 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
+                    </div>
+                    </div>
+                    </div>
+                 </div>
                  <ModernButton 
                     variant="voice" 
                     size="full" 
@@ -1819,11 +1894,20 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                             ? ` 산소포화도 ${patientData.oxygenSaturation.trim()}%.`
                             : '';
                           const report = `환자 보고: ${patientInfo.age || ''}세 ${genderText} 환자. 이름: ${patientInfo.name || '정보 없음'}. 생년월일: ${patientInfo.birthdate || '정보 없음'}. 주증상: ${patientData.symptoms}. 의식: ${patientData.consciousness}. 호흡수: ${patientData.respiration || '정보 없음'}.${oxygenSaturationText} 맥박: ${patientData.pulse || '정보 없음'}. 혈압: ${patientData.bloodPressure || '정보 없음'}. 체온: ${patientData.temperature || '정보 없음'}. 평소 병원: ${patientData.existingHospital || '정보 없음'}.`;
-                          console.log("[flow:text] predict request payload", { text: report });
-                          const result = await predictText(report);
-                          console.log("[flow:text] predict response", result);
+                          console.log("[flow:text] predict request payload", {
+                            text_length: report.length,
+                            ktas_method: ktasMethod,
+                          });
+                          const result = await predictText(report, ktasMethod);
+                          console.log("[flow:text] ktas response summary", summarizeKtasResponse(result));
                           applyBackendResult(result);
-                          console.log("[flow:text] normalized case", normalizePredictResult(result));
+                          const textNormalizedCase = normalizePredictResult(result);
+                          console.log("[flow:text] normalized case summary", {
+                            ktas: textNormalizedCase.ktas,
+                            complaint_id: textNormalizedCase.complaint_id,
+                            has_complaint_label: Boolean(textNormalizedCase.complaint_label),
+                            has_corrected_text: Boolean(textNormalizedCase.corrected_text),
+                          });
                           console.log("[flow:text] saved case; waiting for recommend button");
                         } catch (err) {
                           console.error("텍스트 기반 KTAS 호출 실패:", err);
@@ -1893,6 +1977,17 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                     {patientData.symptoms || "입력되지 않음"}
                   </p>
                 </div>
+
+                {ktasStage1Response?.fallback_from && ktasStage1Response?.fallback_reason && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    <p className="font-bold">
+                      RAG 기반 KTAS 처리 중 문제가 발생하여 규칙 기반 KTAS로 산출되었습니다.
+                    </p>
+                    <p className="mt-1 break-words text-amber-700">
+                      {ktasStage1Response.fallback_reason}
+                    </p>
+                  </div>
+                )}
 
                 <div className={cn("rounded-2xl p-3", getToneByLevel(patientData.ktasLevel).bg, getToneByLevel(patientData.ktasLevel).border)}>
                   <div className="grid grid-cols-2 gap-3">

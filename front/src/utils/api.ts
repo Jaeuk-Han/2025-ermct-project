@@ -89,7 +89,15 @@ export interface RoutingCandidateResponse {
   case: RoutingCase;
   hospitals: RoutingCandidateHospital[];
   stt_vitals?: STTVitals | null;
+  ktas_method?: KtasMethod | string | null;
+  confidence?: number | null;
+  evidence?: string[];
+  ktas_options?: Array<Record<string, any>> | null;
+  fallback_from?: string | null;
+  fallback_reason?: string | null;
 }
+
+export type KtasMethod = 'rule_based' | 'rag_based';
 
 export interface KtasRoutePayload {
   ktas_level: number;
@@ -179,8 +187,11 @@ export async function routePath(
   return postJson<RoutePathResponse>("/api/ktas/route/path", payload);
 }
 
-export async function predictAudio(formData: FormData): Promise<RoutingCandidateResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/ktas/predict-audio`, {
+export async function predictAudio(
+  formData: FormData,
+  ktasMethod: KtasMethod = 'rule_based',
+): Promise<RoutingCandidateResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/ktas/predict-audio?ktas_method=${encodeURIComponent(ktasMethod)}`, {
     method: "POST",
     body: formData,
   });
@@ -191,6 +202,12 @@ export async function predictAudio(formData: FormData): Promise<RoutingCandidate
   return res.json() as Promise<RoutingCandidateResponse>;
 }
 
-export async function predictText(text: string): Promise<RoutingCandidateResponse> {
-  return postJson<RoutingCandidateResponse>("/api/ktas/predict-text", { text });
+export async function predictText(
+  text: string,
+  ktasMethod: KtasMethod = 'rule_based',
+): Promise<RoutingCandidateResponse> {
+  return postJson<RoutingCandidateResponse>("/api/ktas/predict-text", {
+    text,
+    ktas_method: ktasMethod,
+  });
 }
