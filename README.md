@@ -2,6 +2,8 @@
 
 **Voice-based Intelligent Triage & Ambulance Link**
 
+![VITAL hospital recommendation demo](assets/readme-hero.png)
+
 VITAL은 구급대원이 환자 상태를 음성 또는 텍스트로 입력하면 KTAS를 추정하고, 주증상과 위치/시군구 정보를 바탕으로 적합한 응급의료기관 후보를 추천하는 응급 이송 지원 시스템입니다.
 
 이 프로젝트는 FastAPI 백엔드, React 프론트엔드, Supabase 연동, 응급의료기관 공개 API, Tmap 경로 API, KTAS rule-based/RAG-based 분류 흐름을 포함합니다.
