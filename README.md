@@ -7,6 +7,18 @@
 
 ---
 
+## Documentation
+
+프로젝트 설치 방법, API 명세, 예제 코드는 GitHub Wiki에서 확인할 수 있습니다.
+
+- [Project Wiki](../../wiki)
+- [API Reference](../../wiki/API-Reference)
+- [Example Usage](../../wiki/Example-Usage)
+
+service role key, 실제 API key, access token, refresh token, 실제 환자 개인정보는 프론트엔드, README, Wiki에 포함하지 않습니다.
+
+---
+
 ## 1. 주요 시스템 구조
 
 ![uml_png](/assets/uml.png)
