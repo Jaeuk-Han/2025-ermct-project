@@ -45,9 +45,16 @@ Install Docker and the Docker Compose plugin:
 sudo apt-get update
 sudo apt-get install -y ca-certificates curl gnupg
 sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
 sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo usermod -aG docker "$USER"
@@ -82,6 +89,12 @@ Set real values for:
 - `VITE_SUPABASE_ANON_KEY`
 
 Do not commit `.env.production`.
+
+Configure external service consoles before testing the browser app:
+
+- Kakao JavaScript key: add allowed domains for `http://YOUR_SERVER_PUBLIC_IP` and later `https://your-domain.example`.
+- T-map browser key: add the production domain/IP in the app settings if your T-map console enforces web domain restrictions.
+- Supabase Auth: if Auth is used, set the Site URL and Redirect URLs to the production origin, for example `http://YOUR_SERVER_PUBLIC_IP` and later `https://your-domain.example`.
 
 Build and start:
 
@@ -185,6 +198,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml build
 - Frontend still calls the old API URL: rebuild the frontend image after changing `VITE_*` variables.
 - Browser CORS errors: set `CORS_ALLOW_ORIGINS` to the exact frontend origin, including scheme and port.
 - `/api/...` returns `502`: check `docker compose -f docker-compose.prod.yml logs backend`.
+- `413 Request Entity Too Large` on audio upload: confirm `client_max_body_size 25m;` is present in `nginx/default.conf`, then rebuild and restart the frontend/Nginx container.
 - Audio/STT failures: confirm the backend image includes `ffmpeg` and check backend logs.
 - Supabase auth/realtime failures: confirm `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`, then rebuild frontend.
 
