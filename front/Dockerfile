@@ -1,0 +1,34 @@
+FROM node:20-alpine AS build
+
+WORKDIR /app
+
+ARG VITE_API_BASE_URL=/api
+ARG VITE_DEMO_AUTH=false
+ARG VITE_TMAP_API_KEY=
+ARG VITE_KAKAO_MAP_KEY=
+ARG VITE_KAKAO_MAP_APP_KEY=
+ARG VITE_SUPABASE_URL=
+ARG VITE_SUPABASE_ANON_KEY=
+
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
+    VITE_DEMO_AUTH=$VITE_DEMO_AUTH \
+    VITE_TMAP_API_KEY=$VITE_TMAP_API_KEY \
+    VITE_KAKAO_MAP_KEY=$VITE_KAKAO_MAP_KEY \
+    VITE_KAKAO_MAP_APP_KEY=$VITE_KAKAO_MAP_APP_KEY \
+    VITE_SUPABASE_URL=$VITE_SUPABASE_URL \
+    VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
+
+COPY front/package*.json ./
+RUN npm ci
+
+COPY front/ ./
+RUN npm run build
+
+FROM nginx:1.27-alpine
+
+COPY nginx/default.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/build /usr/share/nginx/html
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

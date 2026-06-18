@@ -1,7 +1,14 @@
 const API_BASE_URL =
   (typeof import.meta !== "undefined" &&
     (import.meta as any).env?.VITE_API_BASE_URL) ||
-  "http://localhost:8000";
+  "/api";
+
+function apiPath(path: string): string {
+  const base = API_BASE_URL.replace(/\/+$/, "");
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const apiBase = base.endsWith("/api") ? base : `${base}/api`;
+  return `${apiBase}${normalizedPath}`;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -18,7 +25,7 @@ export class ApiError extends Error {
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetch(apiPath(path), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -136,10 +143,10 @@ export interface RoutePathResponse {
 export async function routeFromKTAS(
   payload: KtasRoutePayload,
 ): Promise<RoutingCandidateResponse> {
-  const path = "/api/ktas/route/seoul";
+  const path = "/ktas/route/seoul";
   console.log("[route/seoul request payload]", JSON.stringify(payload, null, 2));
 
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetch(apiPath(path), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -176,7 +183,7 @@ export async function routeNearest(
   payload: NearestRoutingRequest,
 ): Promise<RoutingCandidateResponse> {
   return postJson<RoutingCandidateResponse>(
-    "/api/ktas/route/seoul/nearest",
+    "/ktas/route/seoul/nearest",
     payload,
   );
 }
@@ -184,14 +191,14 @@ export async function routeNearest(
 export async function routePath(
   payload: RoutePathRequest,
 ): Promise<RoutePathResponse> {
-  return postJson<RoutePathResponse>("/api/ktas/route/path", payload);
+  return postJson<RoutePathResponse>("/ktas/route/path", payload);
 }
 
 export async function predictAudio(
   formData: FormData,
   ktasMethod: KtasMethod = 'rule_based',
 ): Promise<RoutingCandidateResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/ktas/predict-audio?ktas_method=${encodeURIComponent(ktasMethod)}`, {
+  const res = await fetch(apiPath(`/ktas/predict-audio?ktas_method=${encodeURIComponent(ktasMethod)}`), {
     method: "POST",
     body: formData,
   });
@@ -206,7 +213,7 @@ export async function predictText(
   text: string,
   ktasMethod: KtasMethod = 'rule_based',
 ): Promise<RoutingCandidateResponse> {
-  return postJson<RoutingCandidateResponse>("/api/ktas/predict-text", {
+  return postJson<RoutingCandidateResponse>("/ktas/predict-text", {
     text,
     ktas_method: ktasMethod,
   });

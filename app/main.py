@@ -714,11 +714,19 @@ def _build_reason_summary_with_coverage(
 
 
 
+def _get_cors_allow_origins() -> List[str]:
+    raw_origins = os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    )
+    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+
+
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 개발 단계에서는 * 허용, 추후 제한 필요해보임
+    allow_origins=_get_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -52,6 +52,12 @@ def _declared_routes() -> dict[tuple[str, str], str | None]:
 
 
 class MainRouteContractTests(unittest.TestCase):
+    def test_cors_origins_are_environment_driven(self) -> None:
+        source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn("CORS_ALLOW_ORIGINS", source)
+        self.assertNotIn('allow_origins=["*"]', source)
+
     def test_existing_route_methods_and_response_models_are_declared(self) -> None:
         expected = {
             ("/health", "GET"): None,
