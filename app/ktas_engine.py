@@ -329,9 +329,6 @@ def classify_ktas(sbar: dict) -> dict:
 
     if spo2 is not None and spo2 <= 90:
         reasons.append(f"SpO2 {spo2}% 저하")
-    
-    if spo2 is not None and avpu is not None and spo2 < 90 and avpu == "A":
-        ktas = 2
 
     if rr is not None and rr >= 30:
         reasons.append(f"RR {rr}로 빈호흡")
