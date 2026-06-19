@@ -91,22 +91,11 @@ def _log_stt_text(stage: str, text: str) -> None:
         "yes",
         "on",
     }
+    message = f"[STT] {stage} length={len(text or '')} non_empty={bool(text)}"
     if text_logs_enabled:
-        logger.info(
-            "[STT] %s length=%s non_empty=%s text=%r",
-            stage,
-            len(text or ""),
-            bool(text),
-            text,
-        )
-        return
+        message += f" text={text!r}"
 
-    logger.info(
-        "[STT] %s length=%s non_empty=%s",
-        stage,
-        len(text or ""),
-        bool(text),
-    )
+    print(message, flush=True)
 
 
 

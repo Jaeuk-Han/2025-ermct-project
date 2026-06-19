@@ -78,11 +78,11 @@ class STTCleanerTests(unittest.TestCase):
 
         with (
             patch.dict("app.stt_cleaner.os.environ", {}, clear=True),
-            self.assertLogs("app.stt_cleaner", level="INFO") as captured,
+            patch("sys.stdout", new_callable=StringIO) as stdout,
         ):
             self._run_audio_flow(raw_text, clean_text)
 
-        output = "\n".join(captured.output)
+        output = stdout.getvalue()
         self.assertIn(
             f"[STT] raw_transcript length={len(raw_text)} non_empty=True",
             output,
@@ -106,11 +106,11 @@ class STTCleanerTests(unittest.TestCase):
                     {"STT_DEBUG_TEXT_LOGS": flag_value},
                     clear=True,
                 ),
-                self.assertLogs("app.stt_cleaner", level="INFO") as captured,
+                patch("sys.stdout", new_callable=StringIO) as stdout,
             ):
                 self._run_audio_flow(raw_text, clean_text)
 
-            output = "\n".join(captured.output)
+            output = stdout.getvalue()
             self.assertIn(f"[STT] raw_transcript length={len(raw_text)}", output)
             self.assertIn(f"text={raw_text!r}", output)
             self.assertIn(f"[STT] refined_text length={len(clean_text)}", output)
