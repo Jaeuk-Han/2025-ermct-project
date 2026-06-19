@@ -7,13 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from typing import Dict, List, Literal, Set, Optional, Sequence, Tuple
 from fastapi import UploadFile, File # UploadFile, File 추가
-# 뒤에 ', get_whisper_model' 을 꼭 붙여야 합니다!
 from app.stt_cleaner import (
     InvalidSTTAudioError,
     ktas_from_audio,
     ktas_from_text,
     build_stage2_payload,
-    get_whisper_model,
 )
 from pydantic import BaseModel
 
@@ -740,9 +738,6 @@ ermct_client = ErmctClient()
 @app.on_event("startup")
 async def startup_event():
     global sigungu_adjacency_index
-    print(" [Startup] Whisper AI 모델 로딩 시작...")
-    get_whisper_model()
-    print(" [Startup] Whisper AI 모델 로딩 완료!")
     sigungu_adjacency_index = load_sigungu_adjacency(SIGUNGU_ADJACENCY_PATH)
     print(f" [Startup] Sigungu adjacency 로딩 완료: {len(sigungu_adjacency_index.all_codes)}개 코드")
 
