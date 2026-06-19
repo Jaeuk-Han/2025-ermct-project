@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Optional, Union, IO
 from difflib import SequenceMatcher, get_close_matches
 
-import whisper
 from openai import OpenAI
 from dotenv import load_dotenv
 from app.ktas_engine import run_ktas_engine
@@ -19,15 +18,11 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-os.environ["XDG_CACHE_HOME"] = r"C:\whisper_cache"
-os.environ["WHISPER_CACHE_DIR"] = r"C:\whisper_cache"
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     logger.warning("[CONFIG] OPENAI_API_KEY is not set")
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-whisper_model = None
 
 RAG_VECTOR_STORE: Optional[KtasVectorStore] = None
 RAG_INDEX_PATH = Path(__file__).resolve().parent.parent / "data" / "ktas_guideline_index.json"
@@ -89,43 +84,33 @@ def get_openai_client() -> OpenAI:
     return client
 
 
-def get_whisper_model():
-    global whisper_model
-    if whisper_model is None:
-        logger.info("[STT] whisper model loading model=large-v3")
-        whisper_model = whisper.load_model("large-v3")
-        logger.info("[STT] whisper model loaded model=large-v3")
-    return whisper_model
-
 
 def speech_to_text(audio_source: Union[str, IO]) -> str:
-    model = get_whisper_model()
+    openai_client = get_openai_client()
 
     if isinstance(audio_source, str):
-        audio_path = audio_source
-        delete_after = False
-    else:
-        delete_after = True
-        source_name = str(getattr(audio_source, "name", "") or "")
-        suffix = os.path.splitext(source_name)[1] or ".webm"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            try:
-                audio_source.seek(0)
-            except Exception:
-                pass
-            tmp.write(audio_source.read())
-            audio_path = tmp.name
-        logger.debug("[STT] temporary audio prepared bytes=%s", os.path.getsize(audio_path))
+        with open(audio_source, "rb") as audio_file:
+            transcription = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language="ko",
+                response_format="text",
+            )
+        return transcription.strip()
 
-    try:
-        result = model.transcribe(audio_path, language="ko")
-        return result["text"].strip()
-    finally:
-        if delete_after:
-            try:
-                os.remove(audio_path)
-            except Exception:
-                pass
+    else:
+        try:
+            audio_source.seek(0)
+        except Exception:
+            pass
+
+        transcription = openai_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_source,
+            language="ko",
+            response_format="text",
+        )
+        return transcription.strip()
 
 
 SEOUL_HOSPITAL_DB = [
@@ -557,12 +542,7 @@ def transcribe_clean_and_match_hospital(
 
     return result
     
-    return {
-         "raw_text": raw_text,
-         "clean_text": clean_text,
-         "raw_hospital": raw_hospital,
-         "final_hospital": final_hospital
-     }
+
 
 
 def ktas_from_audio(
