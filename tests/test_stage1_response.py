@@ -87,6 +87,22 @@ class Stage1ResponseTests(unittest.TestCase):
         self.assertEqual(response.fallback_reason, "RAG index not found")
         self.assertEqual(response.ktas_options[0]["ktas"], 2)
 
+    def test_stage1_response_adds_public_blood_pressure_aliases(self) -> None:
+        response = _build_stage1_response(
+            {
+                "ktas": 3,
+                "chief_complaint": "abdominal",
+                "sbar": {"A": {"sbp": 140, "dbp": 80}},
+            }
+        )
+
+        self.assertIn("bp_sys", response.stt_vitals)
+        self.assertIn("bp_dia", response.stt_vitals)
+        self.assertEqual(response.stt_vitals["bp_sys"], 140)
+        self.assertEqual(response.stt_vitals["bp_dia"], 80)
+        self.assertEqual(response.stt_vitals["sbp"], 140)
+        self.assertEqual(response.stt_vitals["dbp"], 80)
+
 
 if __name__ == "__main__":
     unittest.main()

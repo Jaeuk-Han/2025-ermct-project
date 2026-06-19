@@ -502,11 +502,13 @@ def _build_stage1_response(stage1_result: dict) -> RoutingCandidateResponse:
         required_procedure_group_labels=required_group_labels,
     )
 
-    stt_vitals = (
-        stage1_result.get("sbar", {}).get("A", {})
-        if isinstance(stage1_result, dict)
-        else {}
-    )
+    sbar = (stage1_result.get("sbar") or {}) if isinstance(stage1_result, dict) else {}
+    assessment = (sbar.get("A") or {}) if isinstance(sbar, dict) else {}
+    stt_vitals = dict(assessment) if isinstance(assessment, dict) else {}
+    if stt_vitals.get("sbp") is not None:
+        stt_vitals.setdefault("bp_sys", stt_vitals["sbp"])
+    if stt_vitals.get("dbp") is not None:
+        stt_vitals.setdefault("bp_dia", stt_vitals["dbp"])
 
     return RoutingCandidateResponse(
         followup_id=None,
