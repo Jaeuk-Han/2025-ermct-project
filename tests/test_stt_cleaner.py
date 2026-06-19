@@ -8,6 +8,16 @@ from app.stt_cleaner import is_likely_stt_hallucination, transcribe_clean_and_ma
 
 
 class STTCleanerTests(unittest.TestCase):
+    def _run_audio_flow(self, raw_text: str, clean_text: str) -> None:
+        with (
+            patch("app.stt_cleaner.speech_to_text", return_value=raw_text),
+            patch("app.stt_cleaner.llm_clean_text", return_value=clean_text),
+            patch("app.stt_cleaner.extract_followup_hospital", return_value=None),
+            patch("app.stt_cleaner.best_match_hospital", return_value=None),
+            patch("app.stt_cleaner.run_ktas_engine", return_value={"ktas": 3}),
+        ):
+            transcribe_clean_and_match_hospital("audio.webm")
+
     def test_invalid_thanks_only(self) -> None:
         self.assertTrue(is_likely_stt_hallucination("감사합니다."))
 
@@ -61,6 +71,50 @@ class STTCleanerTests(unittest.TestCase):
         self.assertNotIn(clean_text, output)
         self.assertNotIn(raw_hospital, output)
         self.assertNotIn(final_hospital, output)
+
+    def test_audio_flow_logs_metadata_without_transcript_text_by_default(self) -> None:
+        raw_text = "RAW_PATIENT chest pain"
+        clean_text = "REFINED_PATIENT chest pain"
+
+        with (
+            patch.dict("app.stt_cleaner.os.environ", {}, clear=True),
+            self.assertLogs("app.stt_cleaner", level="INFO") as captured,
+        ):
+            self._run_audio_flow(raw_text, clean_text)
+
+        output = "\n".join(captured.output)
+        self.assertIn(
+            f"[STT] raw_transcript length={len(raw_text)} non_empty=True",
+            output,
+        )
+        self.assertIn(
+            f"[STT] refined_text length={len(clean_text)} non_empty=True",
+            output,
+        )
+        self.assertNotIn(raw_text, output)
+        self.assertNotIn(clean_text, output)
+
+    def test_audio_flow_logs_transcript_text_for_truthy_debug_flags(self) -> None:
+        raw_text = "RAW_PATIENT chest pain"
+        clean_text = "REFINED_PATIENT chest pain"
+
+        for flag_value in ("true", "1", "yes", "on"):
+            with (
+                self.subTest(flag_value=flag_value),
+                patch.dict(
+                    "app.stt_cleaner.os.environ",
+                    {"STT_DEBUG_TEXT_LOGS": flag_value},
+                    clear=True,
+                ),
+                self.assertLogs("app.stt_cleaner", level="INFO") as captured,
+            ):
+                self._run_audio_flow(raw_text, clean_text)
+
+            output = "\n".join(captured.output)
+            self.assertIn(f"[STT] raw_transcript length={len(raw_text)}", output)
+            self.assertIn(f"text={raw_text!r}", output)
+            self.assertIn(f"[STT] refined_text length={len(clean_text)}", output)
+            self.assertIn(f"text={clean_text!r}", output)
 
 
 if __name__ == "__main__":

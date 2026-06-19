@@ -84,6 +84,31 @@ def get_openai_client() -> OpenAI:
     return client
 
 
+def _log_stt_text(stage: str, text: str) -> None:
+    text_logs_enabled = os.getenv("STT_DEBUG_TEXT_LOGS", "").strip().lower() in {
+        "true",
+        "1",
+        "yes",
+        "on",
+    }
+    if text_logs_enabled:
+        logger.info(
+            "[STT] %s length=%s non_empty=%s text=%r",
+            stage,
+            len(text or ""),
+            bool(text),
+            text,
+        )
+        return
+
+    logger.info(
+        "[STT] %s length=%s non_empty=%s",
+        stage,
+        len(text or ""),
+        bool(text),
+    )
+
+
 
 def speech_to_text(audio_source: Union[str, IO]) -> str:
     openai_client = get_openai_client()
@@ -496,7 +521,7 @@ def transcribe_clean_and_match_hospital(
     logger.info("[STT] transcription started")
     raw_text = speech_to_text(audio_source)
 
-    logger.debug("[STT] transcription completed text_length=%s", len(raw_text or ""))
+    _log_stt_text("raw_transcript", raw_text)
 
     if is_likely_stt_hallucination(raw_text):
         raise InvalidSTTAudioError(
@@ -506,9 +531,8 @@ def transcribe_clean_and_match_hospital(
         )
 
     clean_text = llm_clean_text(raw_text)
-    
 
-    logger.debug("[STT] text cleanup completed text_length=%s", len(clean_text or ""))
+    _log_stt_text("refined_text", clean_text)
 
     if is_likely_stt_hallucination(clean_text) or is_repetition_amplified(raw_text, clean_text):
         raise InvalidSTTAudioError(
