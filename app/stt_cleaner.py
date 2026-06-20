@@ -233,8 +233,6 @@ def llm_clean_text(raw_text: str) -> str:
 [입력 STT 원문]
 {raw_text}
 
-
-{raw_text}
 """
 
     try:
