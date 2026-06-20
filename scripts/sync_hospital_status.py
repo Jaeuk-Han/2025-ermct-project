@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import requests
 from dotenv import load_dotenv
@@ -239,14 +239,71 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+SyncTarget = tuple[str, str]
+
+
+def parse_sync_targets(value: str) -> list[SyncTarget]:
+    targets: list[SyncTarget] = []
+    for index, raw_target in enumerate(value.split(","), start=1):
+        target = raw_target.strip()
+        if not target or target.count(":") != 1:
+            raise ValueError(
+                "Invalid HOSPITAL_STATUS_SYNC_TARGETS entry "
+                f"#{index}: expected sido:sigungu"
+            )
+
+        sido, sigungu = (part.strip() for part in target.split(":", 1))
+        if not sido or not sigungu:
+            raise ValueError(
+                "Invalid HOSPITAL_STATUS_SYNC_TARGETS entry "
+                f"#{index}: sido and sigungu must be non-empty"
+            )
+        targets.append((sido, sigungu))
+    return targets
+
+
+def resolve_sync_targets(
+    args: argparse.Namespace,
+    environ: Mapping[str, str] = os.environ,
+) -> list[SyncTarget]:
+    configured = environ.get("HOSPITAL_STATUS_SYNC_TARGETS", "").strip()
+    if configured:
+        return parse_sync_targets(configured)
+
+    sido = args.sido or environ.get("HOSPITAL_STATUS_SYNC_SIDO")
+    sigungu = args.sigungu or environ.get("HOSPITAL_STATUS_SYNC_SIGUNGU")
+    if not sido or not sigungu:
+        raise ValueError("Single-region sync requires sido and sigungu")
+    return [(sido, sigungu)]
+
+
+def parse_target_delay_seconds(value: str | None) -> int:
+    raw = (value or "").strip() or "3"
+    try:
+        delay = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "HOSPITAL_STATUS_SYNC_TARGET_DELAY_SECONDS must be a "
+            "non-negative integer"
+        ) from exc
+    if delay < 0:
+        raise ValueError(
+            "HOSPITAL_STATUS_SYNC_TARGET_DELAY_SECONDS must be a "
+            "non-negative integer"
+        )
+    return delay
+
+
 def missing_required_env(args: argparse.Namespace) -> list[str]:
     missing = []
     if not os.getenv("ERMCT_SERVICE_KEY"):
         missing.append("ERMCT_SERVICE_KEY")
-    if not (args.sido or os.getenv("HOSPITAL_STATUS_SYNC_SIDO")):
-        missing.append("HOSPITAL_STATUS_SYNC_SIDO or --sido")
-    if not (args.sigungu or os.getenv("HOSPITAL_STATUS_SYNC_SIGUNGU")):
-        missing.append("HOSPITAL_STATUS_SYNC_SIGUNGU or --sigungu")
+    targets_configured = bool(os.getenv("HOSPITAL_STATUS_SYNC_TARGETS", "").strip())
+    if not targets_configured:
+        if not (args.sido or os.getenv("HOSPITAL_STATUS_SYNC_SIDO")):
+            missing.append("HOSPITAL_STATUS_SYNC_SIDO or --sido")
+        if not (args.sigungu or os.getenv("HOSPITAL_STATUS_SYNC_SIGUNGU")):
+            missing.append("HOSPITAL_STATUS_SYNC_SIGUNGU or --sigungu")
     if not args.dry_run:
         if not os.getenv("SUPABASE_URL"):
             missing.append("SUPABASE_URL")
@@ -325,9 +382,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run_sync_once(args: argparse.Namespace) -> int:
-    sido = args.sido or os.environ["HOSPITAL_STATUS_SYNC_SIDO"]
-    sigungu = args.sigungu or os.environ["HOSPITAL_STATUS_SYNC_SIGUNGU"]
+def run_sync_once(
+    args: argparse.Namespace,
+    *,
+    sido: str | None = None,
+    sigungu: str | None = None,
+) -> int:
+    sido = sido or args.sido or os.environ["HOSPITAL_STATUS_SYNC_SIDO"]
+    sigungu = sigungu or args.sigungu or os.environ["HOSPITAL_STATUS_SYNC_SIGUNGU"]
 
     from app.services.ermct_client import ErmctClient
 
@@ -391,10 +453,7 @@ def run_sync_once(args: argparse.Namespace) -> int:
                 print(f"- {hospital_id} | {hospital_name}")
     else:
         print(f"{target_id} status: found")
-        print(
-            "A2116806 normalized row: "
-            f"{status_rows[target_index]}"
-        )
+        print("A2116806 normalized row: " f"{status_rows[target_index]}")
 
     upserted = 0
     if args.dry_run:
@@ -439,6 +498,62 @@ def run_sync_once(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+def run_sync_cycle(
+    args: argparse.Namespace,
+    targets: Sequence[SyncTarget],
+    target_delay_seconds: int,
+    sync_fn: Callable[..., int] = run_sync_once,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> int:
+    total_targets = len(targets)
+    succeeded_targets = 0
+    failed_targets = 0
+
+    for index, (sido, sigungu) in enumerate(targets, start=1):
+        target_label = f"{sido}:{sigungu}"
+        print(
+            f"[target {index}/{total_targets}] " f"target={target_label} status=started"
+        )
+        try:
+            exit_code = sync_fn(args, sido=sido, sigungu=sigungu)
+        except Exception as exc:
+            exit_code = 1
+            print(
+                f"[target {index}/{total_targets}] target={target_label} "
+                f"status=failed error={sanitize_error_text(exc)}"
+            )
+        else:
+            status = "success" if exit_code == 0 else "failed"
+            print(
+                f"[target {index}/{total_targets}] "
+                f"target={target_label} status={status}"
+            )
+
+        if exit_code == 0:
+            succeeded_targets += 1
+        else:
+            failed_targets += 1
+
+        if index < total_targets and target_delay_seconds > 0:
+            sleep_fn(target_delay_seconds)
+
+    if failed_targets == 0:
+        status = "success"
+    elif succeeded_targets == 0:
+        status = "failed"
+    else:
+        status = "partial-failed"
+
+    print(
+        "sync cycle summary: "
+        f"total_targets={total_targets} "
+        f"succeeded_targets={succeeded_targets} "
+        f"failed_targets={failed_targets} "
+        f"status={status}"
+    )
+    return 1 if failed_targets else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv()
     args = parse_args(argv)
@@ -450,14 +565,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"- {name}")
         return 2
 
+    try:
+        targets = resolve_sync_targets(args)
+        target_delay_seconds = parse_target_delay_seconds(
+            os.getenv("HOSPITAL_STATUS_SYNC_TARGET_DELAY_SECONDS")
+        )
+    except ValueError as exc:
+        print(f"Invalid sync configuration: {exc}")
+        return 2
+
     if not args.interval_seconds:
-        return run_sync_once(args)
+        return run_sync_cycle(args, targets, target_delay_seconds)
 
     while True:
         started_at = now_iso()
         print(f"[{started_at}] sync cycle started")
         try:
-            exit_code = run_sync_once(args)
+            exit_code = run_sync_cycle(
+                args,
+                targets,
+                target_delay_seconds,
+            )
         except Exception as exc:
             exit_code = 1
             print(f"[{now_iso()}] sync cycle failed: {sanitize_error_text(exc)}")

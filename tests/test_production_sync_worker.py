@@ -35,8 +35,12 @@ class ProductionSyncWorkerConfigTests(unittest.TestCase):
             "HOSPITAL_STATUS_SYNC_SIDO",
             "HOSPITAL_STATUS_SYNC_SIGUNGU",
             "HOSPITAL_STATUS_SYNC_INTERVAL_SECONDS",
+            "HOSPITAL_STATUS_SYNC_TARGETS",
+            "HOSPITAL_STATUS_SYNC_TARGET_DELAY_SECONDS",
         ):
             self.assertIn(f"{name}=", env_template)
+        self.assertIn("HOSPITAL_STATUS_SYNC_TARGETS=", env_template.splitlines())
+        self.assertIn("# Seoul example (all districts):", env_template)
         self.assertNotIn("VITE_SUPABASE_SERVICE_ROLE_KEY", env_template)
 
 
