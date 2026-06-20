@@ -266,6 +266,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const [hospitals, setHospitals] = useState<Hospital[]>([]);
   const [isLoadingHospitals, setIsLoadingHospitals] = useState(false);
   const [selectedHospital, setSelectedHospital] = useState<Hospital | null>(null);
+  const [rejectedHospitalIds, setRejectedHospitalIds] = useState<string[]>([]);
   const [requestStatus, setRequestStatus] = useState<'waiting' | 'approved' | 'rejected'>('waiting');
   const [currentRequestId, setCurrentRequestId] = useState<string | null>(null);
   const [routingResponse, setRoutingResponse] = useState<RoutingCandidateResponse | null>(null);
@@ -289,6 +290,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const routeRequestInFlightKeyRef = useRef<string | null>(null);
   const mapPanelRef = useRef<HTMLDivElement | null>(null);
   const kakaoMapRef = useRef<any>(null);
+  const kakaoMapContainerRef = useRef<HTMLDivElement | null>(null);
   const routePolylineRef = useRef<any[]>([]);
   const markersRef = useRef<any[]>([]);
   const routeCacheRef = useRef<Map<string, RouteResult>>(new Map());
@@ -893,6 +895,8 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   };
 
   const handleHospitalSelect = async (hospital: Hospital) => {
+    if (rejectedHospitalIds.includes(hospital.id)) return;
+
     setSelectedHospital(hospital);
     setView('confirm');
     setRequestStatus('waiting');
@@ -1069,6 +1073,28 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     else if (view === 'input') onLogout();
   };
 
+  const handleRejectedRequestContinue = () => {
+    const rejectedHospitalId = selectedHospital?.id ?? null;
+    const unavailableHospitalIds = new Set(rejectedHospitalIds);
+
+    if (rejectedHospitalId) {
+      unavailableHospitalIds.add(rejectedHospitalId);
+      setRejectedHospitalIds(Array.from(unavailableHospitalIds));
+    }
+
+    setSelectedHospital(null);
+    setCurrentRequestId(null);
+    setRequestStatus('waiting');
+    setOpenHospitalId(null);
+    setRouteHospitalId(
+      hospitals.find((hospital) => !unavailableHospitalIds.has(hospital.id))?.id ?? null,
+    );
+    setRouteStatus('idle');
+    setRouteSummary(null);
+    setRouteError(null);
+    setView('list');
+  };
+
   const handleReset = () => {
     setView('input');
     setKtasLocked(false);
@@ -1100,6 +1126,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
       ktasLevel: null
     });
     setSelectedHospital(null);
+    setRejectedHospitalIds([]);
     setOpenHospitalId(null);
     setRouteHospitalId(null);
     setRouteStatus('idle');
@@ -1135,7 +1162,8 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   }, [hospitals]);
 
   const ensureKakaoMap = useCallback(async () => {
-    if (!KAKAO_MAP_APP_KEY || !mapPanelRef.current) return null;
+    const mapContainer = mapPanelRef.current;
+    if (!KAKAO_MAP_APP_KEY || !mapContainer) return null;
 
     if (window.kakao?.maps) {
       await new Promise<void>((resolve) => {
@@ -1164,11 +1192,14 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
       });
     }
 
-    if (!kakaoMapRef.current && mapPanelRef.current) {
-      kakaoMapRef.current = new window.kakao.maps.Map(mapPanelRef.current, {
+    if (mapPanelRef.current !== mapContainer) return null;
+
+    if (!kakaoMapRef.current || kakaoMapContainerRef.current !== mapContainer) {
+      kakaoMapRef.current = new window.kakao.maps.Map(mapContainer, {
         center: new window.kakao.maps.LatLng(DEFAULT_MAP_CENTER.lat, DEFAULT_MAP_CENTER.lon),
         level: 6,
       });
+      kakaoMapContainerRef.current = mapContainer;
     }
 
     return kakaoMapRef.current;
@@ -1240,6 +1271,8 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   }, []);
 
   useEffect(() => {
+    if (view !== 'list') return;
+
     let cancelled = false;
 
     const renderRouteMap = async () => {
@@ -1524,7 +1557,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     return () => {
       cancelled = true;
     };
-  }, [ensureKakaoMap, fetchDrivingRoute, hospitals, routeHospitalId, syncKakaoMapLayout, userLocation]);
+  }, [ensureKakaoMap, fetchDrivingRoute, hospitals, routeHospitalId, syncKakaoMapLayout, userLocation, view]);
 
   useEffect(() => {
     return () => {
@@ -2134,13 +2167,19 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                         )}
                       </div>
                     </ModernCard>
-                    {hospitals.map((hospital, idx) => (
-                    <ModernCard 
+                    {hospitals.map((hospital, idx) => {
+                      const isRejectedHospital = rejectedHospitalIds.includes(hospital.id);
+                      return (
+                      <ModernCard
                         key={hospital.id} 
-                        onClick={() => handleRouteHospitalChange(hospital)}
+                        onClick={() => {
+                          if (!isRejectedHospital) handleRouteHospitalChange(hospital);
+                        }}
                         className={cn(
                             "group active:scale-[0.98] transition-all relative overflow-hidden border-2 cursor-pointer shadow-md hover:shadow-xl",
-                            routeHospitalId === hospital.id
+                            isRejectedHospital
+                              ? "cursor-not-allowed border-gray-300 bg-gray-100 opacity-60"
+                              : routeHospitalId === hospital.id
                               ? "border-[#00796B] bg-[#E8F6F4] ring-2 ring-[#00796B]"
                               : idx === 0 ? "border-yellow-400 bg-yellow-50/50" :
                               idx === 1 ? "border-slate-300 bg-slate-50/50" :
@@ -2152,6 +2191,11 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                               <h3 className="text-2xl font-black text-gray-900 mb-2 leading-tight break-words">
                                 {hospital.name}
                               </h3>
+                              {isRejectedHospital && (
+                                <span className="mb-2 inline-flex rounded-full bg-red-100 px-2 py-1 text-xs font-bold text-red-700">
+                                  거절됨 · 선택 불가
+                                </span>
+                              )}
                               <div className="flex flex-col gap-1">
                                 {hospital.address && (
                                   <span className="px-2 py-0.5 rounded-full bg-white border border-gray-200 text-[10px] text-gray-600 truncate max-w-[220px]">
@@ -2279,8 +2323,10 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                                 className="flex-1 h-16 bg-blue-600 rounded-2xl flex items-center justify-between px-6 text-white shadow-lg border-2 border-blue-700 group-active:bg-blue-700 transition-colors"
                                 onClick={(e) => {
                                   e.stopPropagation();
+                                  if (isRejectedHospital) return;
                                   handleHospitalSelect(hospital);
                                 }}
+                                disabled={isRejectedHospital}
                             >
                                 <span className="text-xl font-black">수송 요청 보내기</span>
                                 <div className="bg-white/20 p-2 rounded-full">
@@ -2288,8 +2334,9 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                                 </div>
                             </button>
                         </div>
-                    </ModernCard>
-                    ))}
+                      </ModernCard>
+                      );
+                    })}
                 </div>
               )}
             </motion.div>
@@ -2320,7 +2367,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                         </div>
                         <h2 className="text-3xl font-bold text-[#C0392B] mb-2">이송 거절됨</h2>
                         <p className="text-gray-600 font-medium text-lg">다른 병원을 선택해주세요.</p>
-                        <ModernButton variant="primary" size="full" onClick={() => setView('list')} className="mt-8">
+                        <ModernButton variant="primary" size="full" onClick={handleRejectedRequestContinue} className="mt-8">
                             목록으로 돌아가기
                         </ModernButton>
                     </div>
