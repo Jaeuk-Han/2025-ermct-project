@@ -18,6 +18,7 @@ COPY pyproject.toml poetry.lock ./
 RUN poetry install --only main --no-root --no-ansi
 
 COPY app ./app
+COPY scripts ./scripts
 COPY data ./data
 
 EXPOSE 8000
