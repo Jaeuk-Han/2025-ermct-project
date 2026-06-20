@@ -123,7 +123,7 @@ def call_llm2_for_sbar(clean_text: str) -> str:
     규칙:
     - 정보가 없으면 null 또는 false로 둔다.
     - 활력징후 수치는 숫자로 넣는다.
-    - AVPU는 A, V, P, U 중 하나만 넣는다.
+    - 의식수준(AVPU)은 mental_status 필드에 alert / voice / pain / unresponsive 중 하나로 넣는다.
     - chief_complaint_group은 반드시 아래 중 하나만 사용합니다.
         Neurologic
         Respiratory
@@ -159,11 +159,16 @@ def call_llm2_for_sbar(clean_text: str) -> str:
     - modifiers에는 KTAS 판단에 영향을 줄 수 있는 표현을 넣는다.
     예: severe dyspnea, moderate dyspnea, SpO2 85%, sudden onset, LOC positive, crushing pain, tearing pain
     - 활력징후는 숫자만 넣는다.
-    - 의식 A 또는 alert는 mental_status: "alert"로 넣는다.
+    - 의식수준은 mental_status 필드에 아래 풀워드 중 하나로만 넣는다.
+        A → "alert"
+        V → "voice"
+        P → "pain"
+        U → "unresponsive"
+    - 한국어로 말한 의식 표현도 가장 가까운 단계로 매핑한다.
+        예: 명료/얼럿 → alert, 부르면 반응 → voice, 통증에만 반응 → pain, 무반응 → unresponsive
     - CPR/AED는 true/false로 넣는다.
     - severity와 red_flags는 문장의 전체 의미와 환자 상태를 바탕으로 의학적으로 판단합니다.
     - 표현이 정확히 일치하지 않아도 의미가 같으면 적절히 매핑합니다.
-    - ktas 레벨도 예상해서 red_Flags 안에 숫자로 표기하세요.
     """
             },
             {
@@ -275,12 +280,12 @@ def classify_ktas(sbar: dict) -> dict:
         return {"ktas": 1, "reason": "심정지 또는 CPR 상황"}
 
     if has("post resuscitation") and (
-        mental == "coma" or (gcs is not None and gcs <= 8)
+        mental in ["coma", "unresponsive"] or (gcs is not None and gcs <= 8)
     ):
         return {"ktas": 1, "reason": "소생 후 중증 의식저하"}
 
-    if mental == "coma":
-        return {"ktas": 1, "reason": "coma 상태"}
+    if mental in ["coma", "unresponsive"]:
+        return {"ktas": 1, "reason": f"의식 {mental}(AVPU U/무반응 수준)"}
 
     if gcs is not None and gcs <= 8:
         return {"ktas": 1, "reason": f"GCS {gcs}로 중증 의식저하"}
@@ -315,7 +320,7 @@ def classify_ktas(sbar: dict) -> dict:
     # KTAS 2
     # ==================================================
 
-    if mental in ["drowsy", "stupor"]:
+    if mental in ["drowsy", "stupor", "voice", "pain"]:
         reasons.append(f"중등도 의식저하: {mental}")
 
     if gcs is not None and 9 <= gcs <= 13:
@@ -383,7 +388,7 @@ def classify_ktas(sbar: dict) -> dict:
     if fever and (tachycardia or tachypnea):
         reasons.append("발열과 빈맥/빈호흡 동반")
 
-    if fever and mental in ["drowsy", "stupor", "coma"]:
+    if fever and mental in ["drowsy", "stupor", "coma", "voice", "pain"]:
         reasons.append("발열과 의식저하 동반")
 
     if fever and B.get("immunocompromised"):
