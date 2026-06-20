@@ -295,6 +295,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   const markersRef = useRef<any[]>([]);
   const routeCacheRef = useRef<Map<string, RouteResult>>(new Map());
   const activeRouteRequestKeyRef = useRef<string | null>(null);
+  const mapRenderGenerationRef = useRef(0);
   const [patientInfo, setPatientInfo] = useState({
     name: '',
     birthdate: '',
@@ -1068,7 +1069,14 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
   };
 
   const handleBack = () => {
-    if (view === 'confirm') setView('list');
+    if (view === 'confirm') {
+      mapRenderGenerationRef.current += 1;
+      activeRouteRequestKeyRef.current = null;
+      setRouteStatus('idle');
+      setRouteSummary(null);
+      setRouteError(null);
+      setView('list');
+    }
     else if (view === 'list') setView('input');
     else if (view === 'input') onLogout();
   };
@@ -1082,6 +1090,8 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
       setRejectedHospitalIds(Array.from(unavailableHospitalIds));
     }
 
+    mapRenderGenerationRef.current += 1;
+    activeRouteRequestKeyRef.current = null;
     setSelectedHospital(null);
     setCurrentRequestId(null);
     setRequestStatus('waiting');
@@ -1144,6 +1154,14 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     }
   };
 
+  const handleMapPanelRef = useCallback((container: HTMLDivElement | null) => {
+    if (mapPanelRef.current === container) return;
+
+    mapRenderGenerationRef.current += 1;
+    activeRouteRequestKeyRef.current = null;
+    mapPanelRef.current = container;
+  }, []);
+
   useEffect(() => {
     if (!hospitals.length) {
       setRouteHospitalId(null);
@@ -1163,7 +1181,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
   const ensureKakaoMap = useCallback(async () => {
     const mapContainer = mapPanelRef.current;
-    if (!KAKAO_MAP_APP_KEY || !mapContainer) return null;
+    if (!KAKAO_MAP_APP_KEY || !mapContainer?.isConnected) return null;
 
     if (window.kakao?.maps) {
       await new Promise<void>((resolve) => {
@@ -1192,9 +1210,13 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
       });
     }
 
-    if (mapPanelRef.current !== mapContainer) return null;
+    if (mapPanelRef.current !== mapContainer || !mapContainer.isConnected) return null;
 
     if (!kakaoMapRef.current || kakaoMapContainerRef.current !== mapContainer) {
+      mapRenderGenerationRef.current += 1;
+      activeRouteRequestKeyRef.current = null;
+      markersRef.current = [];
+      routePolylineRef.current = [];
       kakaoMapRef.current = new window.kakao.maps.Map(mapContainer, {
         center: new window.kakao.maps.LatLng(DEFAULT_MAP_CENTER.lat, DEFAULT_MAP_CENTER.lon),
         level: 6,
@@ -1205,13 +1227,19 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     return kakaoMapRef.current;
   }, []);
 
-  const syncKakaoMapLayout = useCallback(async (map: any) => {
-    if (!map || !mapPanelRef.current) return;
+  const syncKakaoMapLayout = useCallback(async (
+    map: any,
+    mapContainer: HTMLDivElement,
+    isActiveMapContext: () => boolean,
+  ) => {
+    if (!map || !isActiveMapContext()) return false;
 
     // The map lives inside an animated panel; wait for layout to settle before fitting bounds.
     for (let attempt = 0; attempt < 10; attempt += 1) {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const rect = mapPanelRef.current.getBoundingClientRect();
+      if (!isActiveMapContext()) return false;
+
+      const rect = mapContainer.getBoundingClientRect();
       console.log('[Map] Panel layout before relayout', {
         attempt,
         width: rect.width,
@@ -1219,13 +1247,16 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
       });
 
       if (rect.width > 0 && rect.height > 0) {
+        if (!isActiveMapContext()) return false;
         map.relayout();
-        return;
+        return true;
       }
     }
 
+    if (!isActiveMapContext()) return false;
     console.warn('[Map] Panel height stayed at 0; forcing relayout with fallback size');
     map.relayout();
+    return true;
   }, []);
 
   const fetchDrivingRoute = useCallback(async (
@@ -1274,6 +1305,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
     if (view !== 'list') return;
 
     let cancelled = false;
+    mapRenderGenerationRef.current += 1;
 
     const renderRouteMap = async () => {
       if (!KAKAO_MAP_APP_KEY) {
@@ -1284,28 +1316,82 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
       }
 
       const map = await ensureKakaoMap();
-      if (!map || !window.kakao?.maps || cancelled) return;
-      await syncKakaoMapLayout(map);
+      const mapContainer = mapPanelRef.current;
+      const renderGeneration = mapRenderGenerationRef.current;
+      const isActiveMapContext = () => (
+        !cancelled
+        && view === 'list'
+        && !!map
+        && !!mapContainer
+        && mapContainer.isConnected
+        && mapPanelRef.current === mapContainer
+        && kakaoMapRef.current === map
+        && kakaoMapContainerRef.current === mapContainer
+        && mapRenderGenerationRef.current === renderGeneration
+      );
 
-      markersRef.current.forEach((marker) => marker.setMap(null));
-      markersRef.current = [];
+      if (!map || !mapContainer || !window.kakao?.maps || !isActiveMapContext()) return;
+      let layoutReady = false;
+      try {
+        layoutReady = await syncKakaoMapLayout(map, mapContainer, isActiveMapContext);
+      } catch (error) {
+        if (!isActiveMapContext()) return;
+        console.error('[Map] Kakao layout synchronization failed', error);
+        setRouteStatus('error');
+        setRouteSummary(null);
+        setRouteError('지도 화면을 표시하지 못했습니다.');
+        return;
+      }
+      if (!layoutReady || !isActiveMapContext()) return;
 
-      normalizePolylineCollection(routePolylineRef.current).forEach((polyline) => polyline.setMap(null));
-      routePolylineRef.current = [];
+      try {
+        for (const marker of markersRef.current) {
+          if (!isActiveMapContext()) return;
+          marker.setMap(null);
+        }
+        markersRef.current = [];
+
+        for (const polyline of normalizePolylineCollection(routePolylineRef.current)) {
+          if (!isActiveMapContext()) return;
+          polyline.setMap(null);
+        }
+        routePolylineRef.current = [];
+      } catch (error) {
+        if (!isActiveMapContext()) return;
+        console.error('[Map] Kakao overlay cleanup failed', error);
+        setRouteStatus('error');
+        setRouteSummary(null);
+        setRouteError('지도 화면을 표시하지 못했습니다.');
+        return;
+      }
 
       const bounds = new window.kakao.maps.LatLngBounds();
       let hasBounds = false;
       const setFallbackView = () => {
+        if (!isActiveMapContext()) return false;
         map.relayout();
+        if (!isActiveMapContext()) return false;
         map.setCenter(new window.kakao.maps.LatLng(DEFAULT_MAP_CENTER.lat, DEFAULT_MAP_CENTER.lon));
+        if (!isActiveMapContext()) return false;
         map.setLevel(7);
+        return true;
       };
       const extendBounds = (coordinate: MapCoordinate | MarkerEntry | null) => {
-        if (!coordinate) return null;
+        if (!coordinate || !isActiveMapContext()) return null;
         const latLng = new window.kakao.maps.LatLng(coordinate.lat, coordinate.lon);
+        if (!isActiveMapContext()) return null;
         bounds.extend(latLng);
         hasBounds = true;
         return latLng;
+      };
+      const fitCurrentBounds = () => {
+        if (!isActiveMapContext()) return false;
+        if (!hasBounds) return setFallbackView();
+
+        map.relayout();
+        if (!isActiveMapContext()) return false;
+        map.setBounds(bounds, 48, 48, 48, 48);
+        return true;
       };
       const markerEntries: MarkerEntry[] = [];
 
@@ -1343,42 +1429,59 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
         });
       });
 
-      markersRef.current = markerEntries.map((entry) => {
-        const position = extendBounds(entry);
-        const image = entry.current
-          ? new window.kakao.maps.MarkerImage(
-              `data:image/svg+xml;charset=UTF-8,${CURRENT_LOCATION_MARKER_SVG}`,
-              new window.kakao.maps.Size(34, 34),
-              {
-                offset: new window.kakao.maps.Point(17, 17),
-              },
-            )
-          : new window.kakao.maps.MarkerImage(
-              `data:image/svg+xml;charset=UTF-8,${buildHospitalMarkerSvg(
-                getRankColor(entry.rank),
-                entry.rank,
-                !!entry.selected,
-              )}`,
-              new window.kakao.maps.Size(36, 48),
-              {
-                offset: new window.kakao.maps.Point(18, 46),
-              },
-            );
-        const marker = new window.kakao.maps.Marker({
-          position,
-          title: entry.title,
-          image,
-        });
+      const nextMarkers: any[] = [];
+      try {
+        for (const entry of markerEntries) {
+          if (!isActiveMapContext()) return;
+          const position = extendBounds(entry);
+          if (!position || !isActiveMapContext()) return;
+          const image = entry.current
+            ? new window.kakao.maps.MarkerImage(
+                `data:image/svg+xml;charset=UTF-8,${CURRENT_LOCATION_MARKER_SVG}`,
+                new window.kakao.maps.Size(34, 34),
+                {
+                  offset: new window.kakao.maps.Point(17, 17),
+                },
+              )
+            : new window.kakao.maps.MarkerImage(
+                `data:image/svg+xml;charset=UTF-8,${buildHospitalMarkerSvg(
+                  getRankColor(entry.rank),
+                  entry.rank,
+                  !!entry.selected,
+                )}`,
+                new window.kakao.maps.Size(36, 48),
+                {
+                  offset: new window.kakao.maps.Point(18, 46),
+                },
+              );
+          if (!isActiveMapContext()) return;
+          const marker = new window.kakao.maps.Marker({
+            position,
+            title: entry.title,
+            image,
+          });
+          nextMarkers.push(marker);
 
-        if (entry.current) {
-          marker.setZIndex(10);
-        } else if (entry.selected) {
-          marker.setZIndex(8);
+          if (entry.current) {
+            if (!isActiveMapContext()) return;
+            marker.setZIndex(10);
+          } else if (entry.selected) {
+            if (!isActiveMapContext()) return;
+            marker.setZIndex(8);
+          }
+
+          if (!isActiveMapContext()) return;
+          marker.setMap(map);
         }
-
-        marker.setMap(map);
-        return marker;
-      });
+      } catch (error) {
+        if (!isActiveMapContext()) return;
+        console.error('[Map] Kakao marker rendering failed', error);
+        setRouteStatus('error');
+        setRouteSummary(null);
+        setRouteError('지도 화면을 표시하지 못했습니다.');
+        return;
+      }
+      markersRef.current = nextMarkers;
 
       const selectedHospital = hospitals.find((hospital) => hospital.id === routeHospitalId) ?? null;
       const selectedHospitalRank = selectedHospital
@@ -1396,12 +1499,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
         setRouteStatus('idle');
         setRouteSummary(null);
         setRouteError(null);
-        if (hasBounds) {
-          map.relayout();
-          map.setBounds(bounds, 48, 48, 48, 48);
-        } else {
-          setFallbackView();
-        }
+        fitCurrentBounds();
         return;
       }
 
@@ -1414,12 +1512,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
         setRouteStatus('error');
         setRouteSummary(null);
         setRouteError('지도 좌표가 올바르지 않습니다.');
-        if (hasBounds) {
-          map.relayout();
-          map.setBounds(bounds, 48, 48, 48, 48);
-        } else {
-          setFallbackView();
-        }
+        fitCurrentBounds();
         return;
       }
 
@@ -1433,53 +1526,48 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
         setRouteStatus('error');
         setRouteSummary(null);
         setRouteError(TMAP_API_KEY_ERROR_MESSAGE);
-        if (hasBounds) {
-          map.relayout();
-          map.setBounds(bounds, 48, 48, 48, 48);
-        } else {
-          setFallbackView();
-        }
+        fitCurrentBounds();
         return;
       }
 
       const cachedRoute = routeCacheRef.current.get(routeKey);
       if (cachedRoute) {
-        if (cancelled || activeRouteRequestKeyRef.current !== routeKey) return;
+        if (!isActiveMapContext() || activeRouteRequestKeyRef.current !== routeKey) return;
 
-        const cachedLatLngPath = cachedRoute.path.map(
-          (point) => new window.kakao.maps.LatLng(point.lat, point.lon),
-        );
-        console.log({
-          origin,
-          selectedHospital: selectedHospitalCoordinate,
-          routePathLength: cachedRoute.path.length,
-          firstRoutePoint: cachedRoute.path[0],
-          lastRoutePoint: cachedRoute.path[cachedRoute.path.length - 1],
-          allRoutePointsAreLatLng: cachedLatLngPath.every(
-            (point) => point instanceof window.kakao.maps.LatLng,
-          ),
-        });
-
-        routePolylineRef.current = buildRoutePolylines(
-          window.kakao.maps,
-          cachedLatLngPath,
-          selectedRouteColor,
-        );
-        normalizePolylineCollection(routePolylineRef.current).forEach((polyline) => polyline.setMap(map));
-        extendBounds(origin);
-        extendBounds(selectedHospitalCoordinate);
-        cachedRoute.path.forEach((point) => {
-          extendBounds(point);
-        });
-        if (hasBounds) {
-          map.relayout();
-          map.setBounds(bounds, 48, 48, 48, 48);
-        } else {
-          setFallbackView();
+        try {
+          const cachedLatLngPath = cachedRoute.path.map(
+            (point) => new window.kakao.maps.LatLng(point.lat, point.lon),
+          );
+          if (!isActiveMapContext()) return;
+          const cachedPolylines = buildRoutePolylines(
+            window.kakao.maps,
+            cachedLatLngPath,
+            selectedRouteColor,
+          );
+          if (!isActiveMapContext()) return;
+          for (const polyline of normalizePolylineCollection(cachedPolylines)) {
+            if (!isActiveMapContext()) return;
+            polyline.setMap(map);
+          }
+          routePolylineRef.current = cachedPolylines;
+          extendBounds(origin);
+          extendBounds(selectedHospitalCoordinate);
+          for (const point of cachedRoute.path) {
+            if (!isActiveMapContext()) return;
+            extendBounds(point);
+          }
+          if (!fitCurrentBounds() || !isActiveMapContext()) return;
+          setRouteStatus('ready');
+          setRouteSummary(cachedRoute.summary);
+          setRouteError(null);
+        } catch (error) {
+          if (!isActiveMapContext() || activeRouteRequestKeyRef.current !== routeKey) return;
+          console.error('[Map] Kakao cached-route rendering failed', error);
+          if (!fitCurrentBounds() || !isActiveMapContext()) return;
+          setRouteStatus('error');
+          setRouteSummary(null);
+          setRouteError('경로 상태를 불러오지 못했습니다.');
         }
-        setRouteStatus('ready');
-        setRouteSummary(cachedRoute.summary);
-        setRouteError(null);
         return;
       }
 
@@ -1493,44 +1581,45 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
           { lat: selectedHospitalCoordinate.lat, lon: selectedHospitalCoordinate.lon },
         );
 
-        if (cancelled || activeRouteRequestKeyRef.current !== routeKey) return;
+        if (!isActiveMapContext() || activeRouteRequestKeyRef.current !== routeKey) return;
 
         routeCacheRef.current.set(routeKey, route);
-        const routeLatLngPath = route.path.map(
-          (point) => new window.kakao.maps.LatLng(point.lat, point.lon),
-        );
-        console.log({
-          origin,
-          selectedHospital: selectedHospitalCoordinate,
-          routePathLength: route.path.length,
-          firstRoutePoint: route.path[0],
-          lastRoutePoint: route.path[route.path.length - 1],
-          allRoutePointsAreLatLng: routeLatLngPath.every(
-            (point) => point instanceof window.kakao.maps.LatLng,
-          ),
-        });
-        routePolylineRef.current = buildRoutePolylines(
-          window.kakao.maps,
-          routeLatLngPath,
-          selectedRouteColor,
-        );
-        normalizePolylineCollection(routePolylineRef.current).forEach((polyline) => polyline.setMap(map));
-        extendBounds(origin);
-        extendBounds(selectedHospitalCoordinate);
-        route.path.forEach((point) => {
-          extendBounds(point);
-        });
-        if (hasBounds) {
-          map.relayout();
-          map.setBounds(bounds, 48, 48, 48, 48);
-        } else {
-          setFallbackView();
+        try {
+          const routeLatLngPath = route.path.map(
+            (point) => new window.kakao.maps.LatLng(point.lat, point.lon),
+          );
+          if (!isActiveMapContext()) return;
+          const routePolylines = buildRoutePolylines(
+            window.kakao.maps,
+            routeLatLngPath,
+            selectedRouteColor,
+          );
+          if (!isActiveMapContext()) return;
+          for (const polyline of normalizePolylineCollection(routePolylines)) {
+            if (!isActiveMapContext()) return;
+            polyline.setMap(map);
+          }
+          routePolylineRef.current = routePolylines;
+          extendBounds(origin);
+          extendBounds(selectedHospitalCoordinate);
+          for (const point of route.path) {
+            if (!isActiveMapContext()) return;
+            extendBounds(point);
+          }
+          if (!fitCurrentBounds() || !isActiveMapContext()) return;
+          setRouteStatus('ready');
+          setRouteSummary(route.summary);
+          setRouteError(null);
+        } catch (renderError) {
+          if (!isActiveMapContext() || activeRouteRequestKeyRef.current !== routeKey) return;
+          console.error('[Map] Kakao route rendering failed', renderError);
+          if (!fitCurrentBounds() || !isActiveMapContext()) return;
+          setRouteStatus('error');
+          setRouteSummary(null);
+          setRouteError('경로 상태를 불러오지 못했습니다.');
         }
-        setRouteStatus('ready');
-        setRouteSummary(route.summary);
-        setRouteError(null);
       } catch (error) {
-        if (cancelled || activeRouteRequestKeyRef.current !== routeKey) return;
+        if (!isActiveMapContext() || activeRouteRequestKeyRef.current !== routeKey) return;
         if (error instanceof ApiError) {
           console.error('Tmap route API request failed', {
             path: error.path,
@@ -1538,14 +1627,9 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
             responseBody: error.body,
           });
         } else {
-          console.error('Error fetching Tmap route:', error);
+          console.error('[Tmap] Route request failed', error);
         }
-        if (hasBounds) {
-          map.relayout();
-          map.setBounds(bounds, 48, 48, 48, 48);
-        } else {
-          setFallbackView();
-        }
+        if (!fitCurrentBounds() || !isActiveMapContext()) return;
         setRouteStatus('error');
         setRouteSummary(null);
         setRouteError('경로 정보를 불러오지 못했습니다');
@@ -1556,13 +1640,20 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
 
     return () => {
       cancelled = true;
+      mapRenderGenerationRef.current += 1;
+      activeRouteRequestKeyRef.current = null;
     };
   }, [ensureKakaoMap, fetchDrivingRoute, hospitals, routeHospitalId, syncKakaoMapLayout, userLocation, view]);
 
   useEffect(() => {
     return () => {
-      markersRef.current.forEach((marker) => marker.setMap(null));
-      normalizePolylineCollection(routePolylineRef.current).forEach((polyline) => polyline.setMap(null));
+      mapRenderGenerationRef.current += 1;
+      activeRouteRequestKeyRef.current = null;
+
+      markersRef.current = [];
+      routePolylineRef.current = [];
+      kakaoMapRef.current = null;
+      kakaoMapContainerRef.current = null;
     };
   }, []);
 
@@ -2146,7 +2237,7 @@ export const ParamedicDashboard: React.FC<ParamedicDashboardProps> = ({ userName
                       </div>
                       <div className="relative">
                         <div
-                          ref={mapPanelRef}
+                          ref={handleMapPanelRef}
                           className="h-[280px] w-full bg-slate-100 sm:h-[300px]"
                           style={{ minHeight: 280 }}
                         />
