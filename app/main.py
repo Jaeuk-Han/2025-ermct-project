@@ -1866,9 +1866,12 @@ async def route_seoul_nearest(
     # 1) distance_logic에 줄 payload 구성
     hospitals_payload = [
         {
+            "id": h.id,
             "name": h.name,
             "latitude": h.latitude,
             "longitude": h.longitude,
+            "coverage_score": h.coverage_score,
+            "priority_score": h.priority_score,
             "reason_summary": h.reason_summary,
         }
         for h in req.hospitals
@@ -1888,20 +1891,21 @@ async def route_seoul_nearest(
     # 3) 거리 기준 상위 3개만 선택
     top3_results = get_top3(results)
 
-    # 4) name 기준으로 매핑 (이름이 중복될 가능성이 낮다고 가정)
-    result_by_name = {r["name"]: r for r in top3_results}
+    # 4) HPID 기준으로 매핑하고, 실제 TMAP 정렬 결과 순서를 유지
+    hospital_by_id = {hospital.id: hospital for hospital in req.hospitals}
 
     top3_hospitals: List[RoutingCandidateHospital] = []
 
-    for h in req.hospitals:
-        r = result_by_name.get(h.name)
-        if not r:
+    for result in top3_results:
+        hospital = hospital_by_id.get(result["id"])
+        if not hospital:
             continue
 
         # 기존 필드는 그대로 두고 distance, duration만 덧입힘
-        data = h.model_dump()
-        data["distance"] = float(r["distance"])
-        data["duration_sec"] = int(r["duration_sec"])
+        data = hospital.model_dump()
+        data["distance"] = float(result["distance"])
+        duration = result.get("duration_sec")
+        data["duration_sec"] = int(duration) if duration is not None else None
 
         top3_hospitals.append(RoutingCandidateHospital(**data))
 
