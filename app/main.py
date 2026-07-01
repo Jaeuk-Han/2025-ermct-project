@@ -15,6 +15,7 @@ from app.stt_cleaner import (
     ktas_from_text,
     build_stage2_payload,
 )
+from app.ktas_engine import SBARParseError
 from pydantic import BaseModel
 import requests
 
@@ -1978,6 +1979,16 @@ async def predict_audio(
                 "stt_text": exc.stt_text,
             },
         ) from exc
+    except SBARParseError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "ok": False,
+                "error": str(exc),
+                "reason": exc.reason,
+                "attempts": exc.attempts,
+            },
+        ) from exc
     return _build_stage1_response(stage1_result)
 
     # 2. 데이터 변환
@@ -2021,7 +2032,28 @@ async def predict_text(req: TextKTASRequest = Body(...)):
     음성 파이프라인과 동일한 decide_ktas_1to3 로직을 사용.
     """
     print("\n[Stage 1] 텍스트 분석 및 KTAS 분류 중...")
-    stage1_result = ktas_from_text(req.text, ktas_method=req.ktas_method)
+    try:
+        stage1_result = ktas_from_text(req.text, ktas_method=req.ktas_method)
+    except InvalidSTTAudioError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "error": str(exc),
+                "reason": exc.reason,
+                "stt_text": exc.stt_text,
+            },
+        ) from exc
+    except SBARParseError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "ok": False,
+                "error": str(exc),
+                "reason": exc.reason,
+                "attempts": exc.attempts,
+            },
+        ) from exc
     return _build_stage1_response(stage1_result)
 
     payload_dict = build_stage2_payload(stage1_result)

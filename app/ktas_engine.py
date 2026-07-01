@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, Optional, Tuple
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -180,7 +181,10 @@ def call_llm2_for_sbar(clean_text: str) -> str:
         #temperature=0
     )
 
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    if content is None or not content.strip():
+        raise ValueError("LLM이 빈 SBAR 응답을 반환했습니다.")
+    return content.strip()
 
     
 
@@ -188,13 +192,82 @@ def call_llm2_for_sbar(clean_text: str) -> str:
 # 4. JSON 파싱
 # =====================================================
 
+SBAR_PARSE_MAX_ATTEMPTS = 3
+
+
+class SBARParseError(ValueError):
+    """SBAR 추출/파싱을 재시도까지 했으나 끝내 실패한 경우."""
+
+    def __init__(
+        self,
+        message: str,
+        reason: str = "sbar_parse_failed",
+        attempts: int | None = None,
+    ):
+        super().__init__(message)
+        self.reason = reason
+        self.attempts = attempts
+
+
+def _extract_json_object(text: str) -> str:
+    """
+    LLM 출력에서 순수 JSON 객체 블록만 뽑아낸다.
+    - ```json ... ``` 코드펜스 제거
+    - 앞뒤에 설명 문장이 붙어 있어도 첫 '{' 부터 마지막 '}' 까지만 추출
+    """
+    stripped = (text or "").strip()
+
+    # 코드펜스 제거 (```json, ```JSON, ``` 등)
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*", "", stripped).strip()
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].strip()
+
+    # 군더더기 텍스트가 앞뒤에 있어도 JSON 객체 경계만 추출
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return stripped[start : end + 1]
+
+    return stripped
+
+
 def parse_sbar_json(llm_output: str) -> Dict[str, Any]:
-    text = llm_output.strip()
+    if not llm_output or not llm_output.strip():
+        raise ValueError("빈 LLM 응답이라 SBAR 파싱 불가")
 
-    if text.startswith("```"):
-        text = text.replace("```json", "").replace("```", "").strip()
+    candidate = _extract_json_object(llm_output)
+    return json.loads(candidate)  # 실패 시 JSONDecodeError(ValueError 하위) 발생
 
-    return json.loads(text)
+
+def get_sbar_from_text(
+    clean_text: str,
+    max_attempts: int = SBAR_PARSE_MAX_ATTEMPTS,
+) -> Dict[str, Any]:
+    """
+    SBAR 추출을 호출하고 JSON 파싱까지 시도한다.
+    형식 오류/빈 응답이면 기본값으로 때우지 않고 LLM을 다시 호출해 재시도한다.
+    max_attempts 회까지 모두 실패하면 명시적으로 예외를 던진다.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            llm_output = call_llm2_for_sbar(clean_text)
+            return parse_sbar_json(llm_output)
+        except ValueError as exc:  # JSONDecodeError + 빈 응답 가드 포함
+            last_error = exc
+            logger.warning(
+                "[KTAS] SBAR 파싱 실패 attempt=%s/%s reason=%s",
+                attempt,
+                max_attempts,
+                type(exc).__name__,
+            )
+
+    raise SBARParseError(
+        "발화 내용을 분석하지 못했습니다. 잠시 후 다시 시도하거나 더 명확히 말씀해주세요.",
+        reason="sbar_parse_failed",
+        attempts=max_attempts,
+    )
 
 
 # =====================================================
@@ -465,8 +538,7 @@ def run_ktas_engine(
         rag_vector_store is not None,
     )
 
-    llm_output = call_llm2_for_sbar(clean_text)
-    sbar = parse_sbar_json(llm_output)
+    sbar = get_sbar_from_text(clean_text)
 
     normalized: NormalizedKTASResult
     fallback_reason: str | None = None
