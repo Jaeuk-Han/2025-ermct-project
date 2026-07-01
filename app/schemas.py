@@ -1,7 +1,7 @@
 # app/schemas.py
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 
 from pydantic import BaseModel, Field
 
@@ -411,6 +411,15 @@ class RoutingCandidateResponse(BaseModel):
     ktas_options: Optional[List[Dict[str, Any]]] = None
     fallback_from: Optional[str] = None
     fallback_reason: Optional[str] = None
+    search_status: Optional[Literal[
+        "complete",
+        "partial_candidates",
+        "no_candidates",
+        "fallback_partial",
+        "fallback_exhausted",
+    ]] = None
+    fallback_used: bool = False
+    warnings: List[str] = Field(default_factory=list)
 
 class NearestRoutingRequest(RoutingCandidateResponse):
     user_lat: float
