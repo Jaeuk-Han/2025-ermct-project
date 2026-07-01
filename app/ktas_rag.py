@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydantic import BaseModel, Field, model_validator
 
 load_dotenv()
 
@@ -27,6 +28,34 @@ def get_openai_client() -> OpenAI:
 
 GPT_MODEL = "gpt-5.5"
 EMBEDDING_MODEL = "text-embedding-3-large"
+
+
+class RagResponseParseError(ValueError):
+    pass
+
+
+class RagKtasCandidate(BaseModel):
+    ktas: int = Field(..., ge=1, le=5)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    reason: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_aliases(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if normalized.get("ktas") is None:
+            normalized["ktas"] = normalized.get("ktas_level")
+        if not normalized.get("reason"):
+            normalized["reason"] = normalized.get("primary_reason") or ""
+        warnings = normalized.get("warnings") or []
+        if not normalized["reason"] and "reason_missing" not in warnings:
+            warnings = [*warnings, "reason_missing"]
+        normalized["warnings"] = warnings
+        return normalized
 
 @dataclass
 class KtasGuidelineDoc:
@@ -152,7 +181,14 @@ def build_rag_prompt(clean_text: str, sbar: dict, retrieved_docs: List[Dict[str,
         "KTAS 1은 무의식, 중증 호흡곤란, 중증 탈수 또는 즉각적 소생/순환 지원이 필요한 경우(명백한 쇼크, 명백한 의식소실)로 제한합니다.",
         "KTAS 1~5는 중증도 단계로, 문맥과 기준에 따라 3가지 후보를 추천하십시오.",
         "반드시 KTAS 1~5 숫자 형태로 반환합니다.",
-        "출력은 JSON 배열만 사용하십시오.",
+        "Return JSON only.",
+        "Do not include markdown fences.",
+        "Do not include explanations outside JSON.",
+        "ktas 또는 ktas_level은 1부터 5 사이의 정수여야 합니다.",
+        "confidence는 0.0부터 1.0 사이의 실수여야 합니다.",
+        "정보가 부족하면 값을 만들어내지 말고 null 또는 unknown을 사용하십시오.",
+        "제공된 검색 evidence만 사용하십시오.",
+        "evidence가 부족하면 confidence를 0.5 이하로 설정하고 warning을 추가하십시오.",
         "설명은 한국어로 작성하십시오."
     ]
 
@@ -184,38 +220,48 @@ SBAR 구조화:
 
 
 def parse_rag_response(text: str) -> List[Dict[str, Any]]:
+    def as_candidates(value: Any) -> List[Dict[str, Any]]:
+        if isinstance(value, dict):
+            return [value]
+        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            return value
+        raise ValueError("RAG 출력이 dict 또는 dict 리스트 형식이 아닙니다.")
+
     cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`\n ")
     try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, dict):
-            return [parsed]
-        if isinstance(parsed, list):
-            return parsed
-    except json.JSONDecodeError:
-        raise ValueError("RAG 출력 JSON 파싱에 실패했습니다. 출력 텍스트를 확인하세요.")
-    raise ValueError("RAG 출력이 리스트 또는 dict 형식이 아닙니다.")
+        return as_candidates(json.loads(cleaned))
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    lines = cleaned.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        fenced_lines = lines[1:]
+        if fenced_lines and fenced_lines[-1].strip() == "```":
+            fenced_lines = fenced_lines[:-1]
+        fenced = "\n".join(fenced_lines).strip()
+        try:
+            return as_candidates(json.loads(fenced))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(cleaned):
+        if char not in "[{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(cleaned, index)
+            return as_candidates(parsed)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    raise RagResponseParseError(
+        "RAG 출력 JSON 파싱에 실패했습니다. 출력 텍스트를 확인하세요."
+    )
 
 
 def normalize_candidate(candidate: dict, top_similarity: float) -> dict:
-    ktas = int(candidate.get("ktas") or 0)
-    reason = str(candidate.get("reason") or "").strip()
-    confidence = candidate.get("confidence")
-    if confidence is None:
-        confidence = 0.45 + 0.45 * top_similarity
-    confidence = max(0.0, min(1.0, float(confidence)))
-    evidence = candidate.get("evidence") or []
-    if isinstance(evidence, str):
-        evidence = [evidence]
-    if not isinstance(evidence, list):
-        evidence = [str(evidence)]
-    return {
-        "ktas": ktas,
-        "reason": reason,
-        "confidence": confidence,
-        "evidence": evidence,
-    }
+    validated = RagKtasCandidate.model_validate(candidate)
+    return validated.model_dump()
 
 
 def classify_ktas_rag(

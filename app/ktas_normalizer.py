@@ -20,6 +20,10 @@ class NormalizedKTASResult(BaseModel):
     hospital_followup: str | None = None
     fallback_from: str | None = None
     fallback_reason: str | None = None
+    rule_based_ktas: int | None = None
+    rag_based_ktas: int | None = None
+    rag_confidence: float | None = None
+    safety_merge_applied: bool = False
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

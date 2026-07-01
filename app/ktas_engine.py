@@ -10,7 +10,8 @@ from app.ktas_normalizer import (
     normalize_rag_based_result,
     normalize_rule_based_result,
 )
-from app.ktas_rag import KtasVectorStore, classify_ktas_rag
+from app.ktas_rag import KtasVectorStore, RagResponseParseError, classify_ktas_rag
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -469,6 +470,8 @@ def run_ktas_engine(
 
     normalized: NormalizedKTASResult
     fallback_reason: str | None = None
+    rule_result = classify_ktas(sbar)
+    rule_level = int(rule_result.get("ktas", 0) or 0)
 
     if use_rag:
         try:
@@ -482,11 +485,72 @@ def run_ktas_engine(
                 raw_hospital=raw_hospital,
                 final_hospital=final_hospital,
             )
+            rag_level = normalized.ktas_level
+            rag_confidence = normalized.confidence
+            safety_reason: str | None = None
+
+            if rag_confidence is None or rag_confidence < 0.6:
+                final_level = rule_level
+                safety_reason = "rag_confidence_low"
+            elif not normalized.evidence:
+                final_level = rule_level
+                safety_reason = "rag_evidence_empty"
+            else:
+                final_level = min(rule_level, rag_level)
+                if final_level < rag_level:
+                    safety_reason = "rag_less_urgent_than_rule"
+
+            normalized = normalized.model_copy(
+                update={
+                    "ktas_level": final_level,
+                    "rule_based_ktas": rule_level,
+                    "rag_based_ktas": rag_level,
+                    "rag_confidence": rag_confidence,
+                    "safety_merge_applied": final_level != rag_level,
+                    "fallback_reason": safety_reason,
+                }
+            )
             logger.info(
                 "[KTAS] rag_based classifier succeeded ktas=%s confidence=%s options=%s",
                 normalized.ktas_level,
                 normalized.confidence,
                 len(normalized.ktas_options or []),
+            )
+        except RagResponseParseError:
+            fallback_reason = "rag_parse_failed"
+            logger.warning(
+                "[KTAS] rag_based response parsing failed; fallback to rule_based"
+            )
+            normalized = normalize_rule_based_result(
+                ktas_result=rule_result,
+                sbar=sbar,
+                raw_hospital=raw_hospital,
+                final_hospital=final_hospital,
+                fallback_from="rag_based",
+                fallback_reason=fallback_reason,
+            ).model_copy(
+                update={
+                    "rule_based_ktas": rule_level,
+                    "safety_merge_applied": True,
+                }
+            )
+        except (ValidationError, ValueError):
+            fallback_reason = "rag_validation_failed"
+            logger.warning(
+                "[KTAS] rag_based candidate validation failed; fallback to rule_based"
+            )
+            normalized = normalize_rule_based_result(
+                ktas_result=rule_result,
+                sbar=sbar,
+                raw_hospital=raw_hospital,
+                final_hospital=final_hospital,
+                fallback_from="rag_based",
+                fallback_reason=fallback_reason,
+            ).model_copy(
+                update={
+                    "rule_based_ktas": rule_level,
+                    "safety_merge_applied": True,
+                }
             )
         except Exception as exc:
             fallback_reason = f"RAG fallback: {exc}"
@@ -494,19 +558,22 @@ def run_ktas_engine(
                 "[KTAS] rag_based classifier failed; fallback to rule_based reason=%s",
                 fallback_reason,
             )
-            ktas_result = classify_ktas(sbar)
             normalized = normalize_rule_based_result(
-                ktas_result=ktas_result,
+                ktas_result=rule_result,
                 sbar=sbar,
                 raw_hospital=raw_hospital,
                 final_hospital=final_hospital,
                 fallback_from="rag_based",
                 fallback_reason=fallback_reason,
+            ).model_copy(
+                update={
+                    "rule_based_ktas": rule_level,
+                    "safety_merge_applied": True,
+                }
             )
     else:
-        ktas_result = classify_ktas(sbar)
         normalized = normalize_rule_based_result(
-            ktas_result=ktas_result,
+            ktas_result=rule_result,
             sbar=sbar,
             raw_hospital=raw_hospital,
             final_hospital=final_hospital,
@@ -529,6 +596,10 @@ def run_ktas_engine(
         "ktas_options": normalized.ktas_options,
         "fallback_from": normalized.fallback_from,
         "fallback_reason": normalized.fallback_reason,
+        "rule_based_ktas": normalized.rule_based_ktas,
+        "rag_based_ktas": normalized.rag_based_ktas,
+        "rag_confidence": normalized.rag_confidence,
+        "safety_merge_applied": normalized.safety_merge_applied,
     }
     logger.info(
         "[KTAS] engine result method=%s ktas=%s fallback_from=%s",

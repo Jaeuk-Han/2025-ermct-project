@@ -77,6 +77,10 @@ class Stage1ResponseTests(unittest.TestCase):
                 ],
                 "fallback_from": "rag_based",
                 "fallback_reason": "RAG index not found",
+                "rule_based_ktas": 2,
+                "rag_based_ktas": 4,
+                "rag_confidence": 0.58,
+                "safety_merge_applied": True,
             }
         )
 
@@ -85,6 +89,10 @@ class Stage1ResponseTests(unittest.TestCase):
         self.assertEqual(response.evidence, ["prektas-1"])
         self.assertEqual(response.fallback_from, "rag_based")
         self.assertEqual(response.fallback_reason, "RAG index not found")
+        self.assertEqual(response.rule_based_ktas, 2)
+        self.assertEqual(response.rag_based_ktas, 4)
+        self.assertEqual(response.rag_confidence, 0.58)
+        self.assertTrue(response.safety_merge_applied)
         self.assertEqual(response.ktas_options[0]["ktas"], 2)
 
     def test_stage1_response_adds_public_blood_pressure_aliases(self) -> None:

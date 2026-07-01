@@ -411,6 +411,10 @@ class RoutingCandidateResponse(BaseModel):
     ktas_options: Optional[List[Dict[str, Any]]] = None
     fallback_from: Optional[str] = None
     fallback_reason: Optional[str] = None
+    rule_based_ktas: Optional[int] = None
+    rag_based_ktas: Optional[int] = None
+    rag_confidence: Optional[float] = None
+    safety_merge_applied: Optional[bool] = None
     search_status: Optional[Literal[
         "complete",
         "partial_candidates",

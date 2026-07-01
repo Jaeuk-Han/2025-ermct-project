@@ -650,6 +650,18 @@ def _build_stage1_response(stage1_result: dict) -> RoutingCandidateResponse:
         fallback_reason=stage1_result.get("fallback_reason")
         if isinstance(stage1_result, dict)
         else None,
+        rule_based_ktas=stage1_result.get("rule_based_ktas")
+        if isinstance(stage1_result, dict)
+        else None,
+        rag_based_ktas=stage1_result.get("rag_based_ktas")
+        if isinstance(stage1_result, dict)
+        else None,
+        rag_confidence=stage1_result.get("rag_confidence")
+        if isinstance(stage1_result, dict)
+        else None,
+        safety_merge_applied=stage1_result.get("safety_merge_applied")
+        if isinstance(stage1_result, dict)
+        else None,
     )
 
 
