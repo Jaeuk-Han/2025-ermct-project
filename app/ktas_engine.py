@@ -567,6 +567,12 @@ def run_ktas_engine(
             elif not normalized.evidence:
                 final_level = rule_level
                 safety_reason = "rag_evidence_empty"
+            elif rag_level >= 4:
+                if rule_level <= 2:
+                    final_level = rule_level
+                    safety_reason = "rule_based_safety_priority"
+                else:
+                    final_level = rag_level
             else:
                 final_level = min(rule_level, rag_level)
                 if final_level < rag_level:
