@@ -1,5 +1,7 @@
 # app/main.py
 import os
+import time
+from dataclasses import dataclass, field
 from io import BytesIO
 
 from fastapi import FastAPI, Query, Response, Body, HTTPException
@@ -14,6 +16,7 @@ from app.stt_cleaner import (
     build_stage2_payload,
 )
 from pydantic import BaseModel
+import requests
 
 from .services.ermct_client import ErmctClient
 from .services.sigungu_search import (
@@ -64,6 +67,7 @@ from app.complaint_mapping import (
     COMPLAINT_LABELS,
 )
 from app.routers.reservations import router as reservations_router
+from app.error_utils import sanitize_error_text
 
 
 class TextKTASRequest(BaseModel):
@@ -88,6 +92,12 @@ SEOUL_SIGUNGU_LIST = [
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SIGUNGU_ADJACENCY_PATH = DATA_DIR / "sigungu_adjacency.json"
 DEFAULT_EXPANSION_POLICY = ExpansionPolicy(top_touching_limit=3)
+MAX_GLOBAL_FALLBACK_SIGUNGU = 5
+MAX_GLOBAL_FALLBACK_RAW_HOSPITALS = 20
+MAX_GLOBAL_FALLBACK_VALID_HOSPITALS = 10
+MAX_GLOBAL_FALLBACK_API_CALLS = 20
+MAX_GLOBAL_FALLBACK_SECONDS = 5.0
+MAX_GLOBAL_FALLBACK_TIMEOUTS = 2
 sigungu_adjacency_index: Optional[SigunguAdjacencyIndex] = None
 kakao_region_resolver = KakaoRegionResolver()
 
@@ -184,7 +194,7 @@ def _get_all_indexed_summaries(sm_type: int = 1) -> List[HospitalSummary]:
             )
         except Exception as exc:
             failure_count += 1
-            error_text = str(exc)
+            error_text = sanitize_error_text(exc)
             if "429" in error_text:
                 throttled_count += 1
 
@@ -215,6 +225,113 @@ def _get_all_indexed_summaries(sm_type: int = 1) -> List[HospitalSummary]:
         )
 
     return all_summaries
+
+
+@dataclass
+class GlobalFallbackResult:
+    candidates: List[RoutingCandidateHospital] = field(default_factory=list)
+    reason: Optional[str] = None
+    warnings: List[str] = field(default_factory=list)
+    attempted_sigungu: int = 0
+    raw_hospitals: int = 0
+    estimated_api_calls: int = 0
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 429 or "429" in str(exc)
+
+
+def _merge_candidates_by_hpid(
+    existing: Sequence[RoutingCandidateHospital],
+    additional: Sequence[RoutingCandidateHospital],
+) -> List[RoutingCandidateHospital]:
+    merged = {candidate.id: candidate for candidate in existing}
+    for candidate in additional:
+        merged.setdefault(candidate.id, candidate)
+    return sorted(
+        merged.values(),
+        key=lambda item: (-item.priority_score, -item.total_effective_beds),
+    )
+
+
+def _run_global_fallback(
+    req: KTASRoutingRequest,
+    complaint_id: int,
+    required_groups: List[str],
+    complaint_label: str,
+) -> GlobalFallbackResult:
+    adjacency = _get_sigungu_adjacency_index()
+    result = GlobalFallbackResult()
+    candidates: List[RoutingCandidateHospital] = []
+    started_at = time.monotonic()
+    consecutive_timeouts = 0
+
+    for sigungu_code in adjacency.all_codes:
+        if result.attempted_sigungu >= MAX_GLOBAL_FALLBACK_SIGUNGU:
+            result.reason = "sigungu_budget_exhausted"
+            break
+        if result.raw_hospitals >= MAX_GLOBAL_FALLBACK_RAW_HOSPITALS:
+            result.reason = "raw_hospital_budget_exhausted"
+            break
+        if len(candidates) >= MAX_GLOBAL_FALLBACK_VALID_HOSPITALS:
+            result.reason = "valid_hospital_budget_exhausted"
+            break
+        if result.estimated_api_calls + 3 > MAX_GLOBAL_FALLBACK_API_CALLS:
+            result.reason = "api_call_budget_exhausted"
+            break
+        if time.monotonic() - started_at >= MAX_GLOBAL_FALLBACK_SECONDS:
+            result.reason = "time_budget_exhausted"
+            break
+
+        sigungu_name = adjacency.get_name(sigungu_code)
+        sido_code = adjacency.get_sido_code(sigungu_code)
+        sido_name = SIDO_CODE_TO_NAME.get(sido_code) if sido_code else None
+        if not sigungu_name or not sido_name:
+            continue
+
+        result.attempted_sigungu += 1
+        remaining_raw = MAX_GLOBAL_FALLBACK_RAW_HOSPITALS - result.raw_hospitals
+        try:
+            summaries = get_hospital_summaries_by_region(
+                sido=sido_name,
+                sigungu=sigungu_name,
+                sm_type=1,
+                num_rows=min(200, remaining_raw),
+                include_messages=False,
+            )
+            consecutive_timeouts = 0
+        except requests.Timeout as exc:
+            consecutive_timeouts += 1
+            result.warnings.append(sanitize_error_text(exc))
+            if consecutive_timeouts >= MAX_GLOBAL_FALLBACK_TIMEOUTS:
+                result.reason = "timeout_budget_exhausted"
+                break
+            continue
+        except Exception as exc:
+            result.warnings.append(sanitize_error_text(exc))
+            if _is_rate_limited(exc):
+                result.reason = "rate_limited"
+                break
+            continue
+
+        result.raw_hospitals += len(summaries)
+        # Regional calls: realtime, serious acceptance, trauma centers; basic info per hospital.
+        result.estimated_api_calls += 3 + len(summaries)
+        region_candidates = _build_routing_candidates_from_summaries(
+            req=req,
+            complaint_id=complaint_id,
+            required_groups=required_groups,
+            complaint_label=complaint_label,
+            summaries=summaries,
+        )
+        candidates = _merge_candidates_by_hpid(candidates, region_candidates)
+        candidates = candidates[:MAX_GLOBAL_FALLBACK_VALID_HOSPITALS]
+
+    if result.reason is None:
+        result.reason = "all_regions_exhausted"
+    result.candidates = candidates
+    return result
 
 
 def _resolve_home_hpid_from_followup(
@@ -1023,6 +1140,10 @@ def get_hospital_summaries_by_region(
         le=500,
         description="실시간 병상 조회 시 한 번에 가져올 최대 병원 수",
     ),
+    include_messages: bool = Query(
+        True,
+        description="응급실/중증 부가 메시지 포함 여부",
+    ),
 ):
     """
     특정 시/군/구 내 모든 응급의료기관에 대한 통합 요약 정보 리스트
@@ -1092,15 +1213,19 @@ def get_hospital_summaries_by_region(
         serious = serious_by_hpid.get(hpid)
 
         # (3) 응급실/중증 메시지 (외부 API 5xx 등은 무시하고 계속 진행)
-        try:
-            messages = ermct_client.get_emergency_messages(
-                hpid=hpid,
-                num_rows=50,
-                page_no=1,
-            )
-        except Exception as e:
-            print(f"[WARN] get_emergency_messages failed for {hpid}: {e}")
-            messages = []
+        messages: List[HospitalMessage] = []
+        if include_messages:
+            try:
+                messages = ermct_client.get_emergency_messages(
+                    hpid=hpid,
+                    num_rows=50,
+                    page_no=1,
+                )
+            except Exception as exc:
+                print(
+                    f"[WARN] get_emergency_messages failed for {hpid}: "
+                    f"{sanitize_error_text(exc)}"
+                )
 
         # (4) 이름 결정 (basic → realtime → messages 순)
         name: Optional[str] = None
@@ -1641,38 +1766,57 @@ def route_from_ktas_seoul(req: KTASRoutingRequest = Body(...)):
             base_sido_name=current_sido_name,
         )
 
-    should_run_global_fallback = (
-        progressive_result is None
-        or len(candidates) < req.min_valid_hospitals
-        or any(
-            attempt.fetch_status == "error"
-            for attempt in (progressive_result.attempts if progressive_result else [])
+    fallback_used = False
+    fallback_reason: Optional[str] = None
+    warnings: List[str] = []
+    if progressive_result:
+        warnings.extend(
+            sanitize_error_text(attempt.error)
+            for attempt in progressive_result.attempts
+            if attempt.fetch_status == "error" and attempt.error
         )
-    )
 
-    if len(candidates) < req.min_valid_hospitals and should_run_global_fallback:
+    if not candidates:
         print(
             "[ROUTE SEOUL] running global fallback "
             f"candidate_count={len(candidates)} "
             f"min_valid_hospitals={req.min_valid_hospitals}"
         )
-        summaries = _get_all_indexed_summaries(sm_type=1)
-        candidates = _build_routing_candidates_from_summaries(
+        fallback_used = True
+        fallback_result = _run_global_fallback(
             req=req,
             complaint_id=complaint_id,
             required_groups=required_groups,
             complaint_label=complaint_label,
-            summaries=summaries,
         )
+        candidates = _merge_candidates_by_hpid(candidates, fallback_result.candidates)
+        fallback_reason = fallback_result.reason
+        warnings.extend(fallback_result.warnings)
+
+    if len(candidates) >= req.min_valid_hospitals:
+        search_status = "complete"
+    elif candidates and fallback_used:
+        search_status = "fallback_partial"
+    elif candidates:
+        search_status = "partial_candidates"
+    elif fallback_used:
+        search_status = "fallback_exhausted"
+    else:
+        search_status = "no_candidates"
 
     followup_id = None
     if req.hospital_followup:
         if req.hospital_followup.startswith("A") and req.hospital_followup[1:].isdigit():
             followup_id = req.hospital_followup
         else:
-            followup_id = _resolve_home_hpid_from_followup(
-                summaries=_get_all_indexed_summaries(sm_type=1),
-                hospital_followup=req.hospital_followup,
+            target = req.hospital_followup.replace(" ", "")
+            followup_id = next(
+                (
+                    candidate.id
+                    for candidate in candidates
+                    if target in candidate.name.replace(" ", "")
+                ),
+                None,
             )
 
     if progressive_result:
@@ -1688,6 +1832,10 @@ def route_from_ktas_seoul(req: KTASRoutingRequest = Body(...)):
         followup_id=followup_id,
         case=routing_case,
         hospitals=candidates,
+        search_status=search_status,
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
+        warnings=warnings,
     )
 
 @app.post(

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
 import time
 from datetime import UTC, datetime
@@ -17,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config_beds import BED_TYPE_FUNCS
+from app.error_utils import sanitize_error_text
 from app.schemas import HospitalBasicInfo, HospitalRealtime
 
 SUPABASE_REST_TIMEOUT_SECONDS = 20
@@ -32,11 +32,6 @@ def safe_int(value: Any) -> int:
         return int(text)
     except (TypeError, ValueError):
         return 0
-
-
-def sanitize_error_text(value: Any) -> str:
-    text = str(value)
-    return re.sub(r"(serviceKey=)[^&\s)]+", r"\1<redacted>", text)
 
 
 def display_beds(value: Any) -> int:

@@ -7,6 +7,7 @@ import requests
 import xmltodict
 
 from app.config import ERMCT_SERVICE_KEY
+from app.error_utils import sanitize_error_text
 from app.schemas import (
     HospitalRealtime,
     HospitalBasicInfo,
@@ -48,14 +49,36 @@ class ErmctClient:
 
     # ---------- 공통 GET 래퍼 ----------
 
+    def _request(self, url: str, query: Dict[str, Any]) -> requests.Response:
+        try:
+            resp = requests.get(url, params=query, timeout=self.timeout)
+            resp.raise_for_status()
+            return resp
+        except requests.Timeout as exc:
+            raise requests.Timeout(
+                sanitize_error_text(exc),
+                request=exc.request,
+            ) from None
+        except requests.HTTPError as exc:
+            raise requests.HTTPError(
+                sanitize_error_text(exc),
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        except requests.RequestException as exc:
+            raise requests.RequestException(
+                sanitize_error_text(exc),
+                request=exc.request,
+                response=exc.response,
+            ) from None
+
     def _get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         query = {
             "serviceKey": self.service_key,
             **params,
         }
         url = f"{BASE_URL}/{path}"
-        resp = requests.get(url, params=query, timeout=self.timeout)
-        resp.raise_for_status()
+        resp = self._request(url, query)
 
         data = xmltodict.parse(resp.text)
         response = data.get("response", {})
@@ -419,8 +442,7 @@ class ErmctClient:
             "pageNo": page_no,
             "numOfRows": num_rows,
         }
-        resp = requests.get(url, params=query, timeout=self.timeout)
-        resp.raise_for_status()
+        resp = self._request(url, query)
         return resp.text
     
 
