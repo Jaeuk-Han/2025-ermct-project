@@ -68,9 +68,12 @@ async def calculate_all_distances_async(user_lat, user_lon, hospitals):
             continue
         
         results.append({
+            "id": h["id"],
             "name": h["name"],
             "distance": dist,
             "duration_sec": duration,
+            "coverage_score": h.get("coverage_score", 0.0),
+            "priority_score": h.get("priority_score", 0.0),
             "reason_summary": h.get("reason_summary", "정보 없음")
         })
 
@@ -82,7 +85,17 @@ async def calculate_all_distances_async(user_lat, user_lon, hospitals):
 
 # TOP3 반환
 def get_top3(results):
-    return sorted(results, key=lambda x: x["distance"])[:3]
+    def sort_key(item):
+        duration = item.get("duration_sec")
+        return (
+            float(item["distance"]),
+            duration is None,
+            float(duration) if duration is not None else float("inf"),
+            -float(item.get("coverage_score") or 0.0),
+            -float(item.get("priority_score") or 0.0),
+        )
+
+    return sorted(results, key=sort_key)[:3]
 
 
 async def get_tmap_route_async(start_lat, start_lon, end_lat, end_lon):
