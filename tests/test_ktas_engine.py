@@ -152,7 +152,7 @@ class KtasEngineTests(unittest.TestCase):
     def test_low_confidence_uses_rule_baseline(self) -> None:
         result, _ = self._run_with_rag(
             rule_level=3,
-            rag_level=2,
+            rag_level=4,
             confidence=0.59,
             evidence=["doc-1"],
         )
@@ -162,21 +162,33 @@ class KtasEngineTests(unittest.TestCase):
         self.assertTrue(result["safety_merge_applied"])
         self.assertEqual(result["fallback_reason"], "rag_confidence_low")
 
-    def test_rule_two_rag_four_keeps_more_urgent_rule_result(self) -> None:
+    def test_rule_three_allows_supported_rag_four(self) -> None:
         result, _ = self._run_with_rag(
-            rule_level=2,
+            rule_level=3,
             rag_level=4,
             confidence=0.9,
             evidence=["doc-1"],
         )
 
-        self.assertEqual(result["ktas"], 2)
-        self.assertTrue(result["safety_merge_applied"])
-        self.assertEqual(result["fallback_reason"], "rag_less_urgent_than_rule")
+        self.assertEqual(result["ktas"], 4)
+        self.assertFalse(result["safety_merge_applied"])
+        self.assertIsNone(result["fallback_reason"])
 
-    def test_rule_four_rag_two_keeps_more_urgent_rag_result(self) -> None:
+    def test_rule_three_allows_supported_rag_five(self) -> None:
         result, _ = self._run_with_rag(
-            rule_level=4,
+            rule_level=3,
+            rag_level=5,
+            confidence=0.9,
+            evidence=["doc-1"],
+        )
+
+        self.assertEqual(result["ktas"], 5)
+        self.assertFalse(result["safety_merge_applied"])
+        self.assertIsNone(result["fallback_reason"])
+
+    def test_rag_one_to_three_still_uses_more_urgent_value(self) -> None:
+        result, _ = self._run_with_rag(
+            rule_level=3,
             rag_level=2,
             confidence=0.9,
             evidence=["doc-1"],
@@ -185,6 +197,41 @@ class KtasEngineTests(unittest.TestCase):
         self.assertEqual(result["ktas"], 2)
         self.assertFalse(result["safety_merge_applied"])
         self.assertIsNone(result["fallback_reason"])
+
+        result, _ = self._run_with_rag(
+            rule_level=2,
+            rag_level=3,
+            confidence=0.9,
+            evidence=["doc-1"],
+        )
+
+        self.assertEqual(result["ktas"], 2)
+        self.assertTrue(result["safety_merge_applied"])
+        self.assertEqual(result["fallback_reason"], "rag_less_urgent_than_rule")
+
+    def test_rule_one_overrides_supported_rag_four_as_safety_signal(self) -> None:
+        result, _ = self._run_with_rag(
+            rule_level=1,
+            rag_level=4,
+            confidence=0.9,
+            evidence=["doc-1"],
+        )
+
+        self.assertEqual(result["ktas"], 1)
+        self.assertTrue(result["safety_merge_applied"])
+        self.assertEqual(result["fallback_reason"], "rule_based_safety_priority")
+
+    def test_rule_two_overrides_supported_rag_five_as_safety_signal(self) -> None:
+        result, _ = self._run_with_rag(
+            rule_level=2,
+            rag_level=5,
+            confidence=0.9,
+            evidence=["doc-1"],
+        )
+
+        self.assertEqual(result["ktas"], 2)
+        self.assertTrue(result["safety_merge_applied"])
+        self.assertEqual(result["fallback_reason"], "rule_based_safety_priority")
 
     def test_rag_parse_failure_preserves_rule_based_fallback_contract(self) -> None:
         sbar = minimal_sbar({"mental_status": "alert"})
