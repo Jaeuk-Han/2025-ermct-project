@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from scripts.build_ktas_detail_embedding_index import (
     EmbeddingBuildError,
@@ -117,6 +118,27 @@ class BuildEmbeddingIndexTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_cli_loads_project_dotenv_when_environment_is_not_injected(self) -> None:
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "routing.json"
+            output = Path(directory) / "index.json"
+            source.write_text(json.dumps({"detail_index": [detail("O:F:AA", "COFAA", "text")]}), encoding="utf-8")
+            args = ["--input", str(source), "--output", str(output)]
+
+            def load_key(*_args, **_kwargs):
+                import os
+                os.environ["OPENAI_API_KEY"] = "loaded-test-key"
+
+            with (
+                patch.dict("os.environ", {}, clear=True),
+                patch("scripts.build_ktas_detail_embedding_index.load_dotenv", side_effect=load_key) as loader,
+            ):
+                result = main(args, client_factory=lambda **_: StubClient())
+
+            self.assertEqual(0, result)
+            loader.assert_called_once()
+            self.assertTrue(output.exists())
+
     def test_cli_creates_deterministic_output_without_network(self) -> None:
         with TemporaryDirectory() as directory:
             source = Path(directory) / "routing.json"

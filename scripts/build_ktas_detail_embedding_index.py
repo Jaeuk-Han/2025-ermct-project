@@ -8,6 +8,8 @@ from pathlib import Path
 import sys
 from typing import Any, Callable, Mapping
 
+from dotenv import load_dotenv
+
 
 REQUIRED_FIELDS = (
     "row_code", "detail_key", "category_code", "category_label",
@@ -108,7 +110,11 @@ def main(
         args = parser.parse_args(argv)
         if args.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        env = os.environ if environ is None else environ
+        if environ is None:
+            load_dotenv(dotenv_path=root / ".env")
+            env = os.environ
+        else:
+            env = environ
         api_key = env.get("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not set")
