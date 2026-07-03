@@ -58,6 +58,10 @@ build/
 # Local Git worktrees
 /.worktrees/
 
-# Generated KTAS routing index
-/data/ktas_routing_index.json
+# RAG 인덱스/평가 데이터 (대용량·환자데이터·실험출력 — 로컬 전용)
+/data/ktas_detail_index_joined.json
 /data/ktas_detail_embedding_index.json
+/data/ktas_routing_index.json
+/data/ktas_guideline_index.json
+/data/rag_eval_results.csv
+/test.xlsx
