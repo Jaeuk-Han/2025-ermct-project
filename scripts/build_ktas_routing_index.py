@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 from pathlib import Path
+import sys
 from typing import Any, Iterable, Mapping, TypedDict
 
 
@@ -346,3 +348,61 @@ def build_index(
         "complaint_label_collision_index": complaint_collision_index,
         "detail_label_collision_index": detail_collision_index,
     }
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    root = Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(
+        description="Build a three-stage KTAS routing index from CSV."
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=root / "data" / "original_pre-ktas.csv",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=root / "data" / "ktas_routing_index.json",
+    )
+    parser.add_argument("--aliases", type=Path, default=None)
+    parser.add_argument("--feature-hints", type=Path, default=None)
+    args = parser.parse_args(argv)
+
+    for option, path in (
+        ("--input", args.input),
+        ("--aliases", args.aliases),
+        ("--feature-hints", args.feature_hints),
+    ):
+        if path is not None and not path.is_file():
+            parser.error(f"{option} file does not exist: {path}")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    rows, warnings = parse_rows(args.input)
+    aliases = load_aliases(args.aliases) if args.aliases is not None else {}
+    feature_hints = (
+        load_feature_hints(args.feature_hints)
+        if args.feature_hints is not None
+        else {}
+    )
+    index = build_index(rows, aliases, feature_hints)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(f"output={args.output}")
+    for name, value in index["stats"].items():
+        print(f"{name}={value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

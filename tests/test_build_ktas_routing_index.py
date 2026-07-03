@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -202,6 +205,72 @@ class AuxiliaryDataTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "AA\\|중증 호흡곤란"):
                 load_feature_hints(hints_path)
+
+
+class CliTests(unittest.TestCase):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "build_ktas_routing_index.py"
+
+    @staticmethod
+    def write_source(directory: str) -> Path:
+        path = Path(directory) / "source.csv"
+        path.write_text(
+            "0,1,2,3,4,5,6,7\n"
+            "COFAA,O,환경손상,F,저체온증,AA,중증 호흡곤란,1\n"
+            "CPBAD,P,일반,B,쏘임,AD,쇼크,2\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(self.script_path), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    def test_omitted_auxiliary_files_use_empty_maps_and_output_is_deterministic(self) -> None:
+        with TemporaryDirectory() as directory:
+            source = self.write_source(directory)
+            output = Path(directory) / "nested" / "index.json"
+            args = ("--input", str(source), "--output", str(output))
+
+            first = self.run_cli(*args)
+            first_bytes = output.read_bytes() if output.exists() else b""
+            second = self.run_cli(*args)
+            second_bytes = output.read_bytes() if output.exists() else b""
+
+            self.assertEqual(0, first.returncode, first.stderr)
+            self.assertEqual(0, second.returncode, second.stderr)
+            self.assertEqual(first_bytes, second_bytes)
+            result = json.loads(first_bytes.decode("utf-8"))
+
+        self.assertEqual([], result["complaint_index"][0]["aliases"])
+        self.assertEqual([], result["detail_index"][0]["feature_hints"])
+        self.assertIn("skipped metadata row", first.stderr)
+        self.assertIn("category_count=2", first.stdout)
+        self.assertIn("detail_row_count=2", first.stdout)
+
+    def test_explicit_missing_auxiliary_file_fails_with_clear_error(self) -> None:
+        with TemporaryDirectory() as directory:
+            source = self.write_source(directory)
+            output = Path(directory) / "index.json"
+            missing = Path(directory) / "missing.json"
+
+            for option in ("--aliases", "--feature-hints"):
+                with self.subTest(option=option):
+                    result = self.run_cli(
+                        "--input",
+                        str(source),
+                        "--output",
+                        str(output),
+                        option,
+                        str(missing),
+                    )
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn(option, result.stderr)
+                    self.assertIn(str(missing), result.stderr)
 
 
 if __name__ == "__main__":

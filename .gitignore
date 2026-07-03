@@ -57,3 +57,6 @@ build/
 
 # Local Git worktrees
 /.worktrees/
+
+# Generated KTAS routing index
+/data/ktas_routing_index.json
