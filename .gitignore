@@ -54,3 +54,6 @@ build/
 .codex/
 .claude/
 .cursor/
+
+# Local Git worktrees
+/.worktrees/

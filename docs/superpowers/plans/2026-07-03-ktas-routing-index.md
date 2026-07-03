@@ -26,7 +26,7 @@
 
 - [ ] **Step 1: Write failing parser tests**
 
-Create tests using temporary UTF-8 CSV files. Assert that quoted commas survive, KTAS becomes `int`, invalid KTAS and missing fields are skipped with warnings, and the first duplicate row code wins.
+Create tests using temporary UTF-8 CSV files. Assert that quoted commas survive, KTAS becomes `int`, invalid KTAS and missing fields are skipped with warnings, and the first duplicate row code/detail key wins. A duplicate record emits both warnings when both identifiers collide.
 
 ```python
 from pathlib import Path
@@ -66,6 +66,7 @@ class ParseRowsTests(unittest.TestCase):
             rows, warnings = parse_rows(path)
         self.assertEqual(["COFAA"], [row["row_code"] for row in rows])
         self.assertTrue(any("duplicate row_code=COFAA" in item for item in warnings))
+        self.assertTrue(any("duplicate detail_key=O:F:AA" in item for item in warnings))
         self.assertTrue(any("invalid ktas" in item for item in warnings))
         self.assertTrue(any("missing required fields" in item for item in warnings))
 ```
@@ -84,7 +85,8 @@ Define `FIELD_NAMES`, a `RoutingRow` typed dictionary, and:
 def parse_rows(path: Path) -> tuple[list[RoutingRow], list[str]]:
     rows: list[RoutingRow] = []
     warnings: list[str] = []
-    seen: set[str] = set()
+    seen_row_codes: set[str] = set()
+    seen_detail_keys: set[str] = set()
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         for line_number, raw in enumerate(csv.reader(handle), start=1):
             if not raw or all(not cell.strip() for cell in raw):
@@ -103,10 +105,22 @@ def parse_rows(path: Path) -> tuple[list[RoutingRow], list[str]]:
                 warnings.append(f"line {line_number}: invalid ktas={record['ktas']!r}")
                 continue
             row_code = record["row_code"]
-            if row_code in seen:
+            parsed_detail_key = (
+                f"{record['category_code']}:{record['complaint_code']}:{record['detail_code']}"
+            )
+            duplicate = False
+            if row_code in seen_row_codes:
                 warnings.append(f"line {line_number}: duplicate row_code={row_code}")
+                duplicate = True
+            if parsed_detail_key in seen_detail_keys:
+                warnings.append(
+                    f"line {line_number}: duplicate detail_key={parsed_detail_key}"
+                )
+                duplicate = True
+            if duplicate:
                 continue
-            seen.add(row_code)
+            seen_row_codes.add(row_code)
+            seen_detail_keys.add(parsed_detail_key)
             rows.append({**record, "ktas": ktas})
     return rows, warnings
 ```
@@ -152,6 +166,8 @@ self.assertIn("AA|중증 호흡곤란|1", result["criterion_index"])
 ```
 
 Also assert that categories contain complaints and complaints contain detail records, `canonical_path` uses ` > `, and stats equal the fixture counts.
+
+Assert every criterion and collision entry exposes `row_code` as its evidence identifier. `detail_key` remains a routing/grouping identifier and never replaces `row_code` in evidence records. Build fixtures with surrounding whitespace in repeated labels and assert collision keys and paths use stripped labels.
 
 - [ ] **Step 2: Run index tests and verify RED**
 
@@ -229,7 +245,7 @@ git commit -m "feat: build three-stage KTAS routing indexes"
 
 - [ ] **Step 1: Write a failing CLI test**
 
-Use `subprocess.run` with `sys.executable`, temporary input/output/enrichment files, and the repository script path. Assert exit code zero, output file existence, `stats` values, warning text on stderr for a metadata row, and summary counts on stdout. Run the command twice and assert output bytes are identical.
+Use `subprocess.run` with `sys.executable`, temporary input/output/enrichment files, and the repository script path. Assert exit code zero, output file existence, `stats` values, warning text on stderr for a metadata row, and summary counts on stdout. Run the command twice and assert output bytes are identical. Add separate cases proving omitted `--aliases`/`--feature-hints` use empty maps, while explicitly supplied missing paths exit non-zero with clear messages naming the missing file.
 
 - [ ] **Step 2: Run the CLI test and verify RED**
 
@@ -239,7 +255,7 @@ Expected: failure because CLI argument parsing and serialization are missing.
 
 - [ ] **Step 3: Implement CLI and deterministic serialization**
 
-Add arguments `--input`, `--output`, `--aliases`, and `--feature-hints`, each defaulting to the paths in the prompt relative to the repository root. Write with:
+Add required defaults only for `--input` and `--output`. Define `--aliases` and `--feature-hints` with `default=None`; load an empty map when omitted. When either option is explicitly supplied, require that file to exist and fail through `parser.error(...)` with the option name and path. Write with:
 
 ```python
 output_path.parent.mkdir(parents=True, exist_ok=True)
