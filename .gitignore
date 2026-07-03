@@ -60,3 +60,4 @@ build/
 
 # Generated KTAS routing index
 /data/ktas_routing_index.json
+/data/ktas_detail_embedding_index.json
