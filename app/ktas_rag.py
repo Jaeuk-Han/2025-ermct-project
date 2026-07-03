@@ -31,7 +31,7 @@ def get_openai_client() -> OpenAI:
 GPT_MODEL = "gpt-5.5"
 # 저가 모델: 클리닝/SBAR추출/중분류선택 등 "쉬운" 작업용. RAG 추론(GPT_MODEL)만 최고가 유지.
 # gpt-5.5-mini가 이 키에서 안 되면 .env에 ERMCT_LIGHT_MODEL=<정확한 모델명> 지정.
-LIGHT_MODEL = os.getenv("ERMCT_LIGHT_MODEL", "gpt-5.5-mini")
+LIGHT_MODEL = os.getenv("ERMCT_LIGHT_MODEL", "gpt-5.4-mini")
 EMBEDDING_MODEL = "text-embedding-3-large"
 
 
