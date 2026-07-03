@@ -15,6 +15,7 @@ from app.stt_cleaner import (
     ktas_from_text,
     build_stage2_payload,
 )
+from app.ktas_engine import SBARParseError
 from pydantic import BaseModel
 import requests
 
@@ -1865,9 +1866,12 @@ async def route_seoul_nearest(
     # 1) distance_logic에 줄 payload 구성
     hospitals_payload = [
         {
+            "id": h.id,
             "name": h.name,
             "latitude": h.latitude,
             "longitude": h.longitude,
+            "coverage_score": h.coverage_score,
+            "priority_score": h.priority_score,
             "reason_summary": h.reason_summary,
         }
         for h in req.hospitals
@@ -1887,20 +1891,21 @@ async def route_seoul_nearest(
     # 3) 거리 기준 상위 3개만 선택
     top3_results = get_top3(results)
 
-    # 4) name 기준으로 매핑 (이름이 중복될 가능성이 낮다고 가정)
-    result_by_name = {r["name"]: r for r in top3_results}
+    # 4) HPID 기준으로 매핑하고, 실제 TMAP 정렬 결과 순서를 유지
+    hospital_by_id = {hospital.id: hospital for hospital in req.hospitals}
 
     top3_hospitals: List[RoutingCandidateHospital] = []
 
-    for h in req.hospitals:
-        r = result_by_name.get(h.name)
-        if not r:
+    for result in top3_results:
+        hospital = hospital_by_id.get(result["id"])
+        if not hospital:
             continue
 
         # 기존 필드는 그대로 두고 distance, duration만 덧입힘
-        data = h.model_dump()
-        data["distance"] = float(r["distance"])
-        data["duration_sec"] = int(r["duration_sec"])
+        data = hospital.model_dump()
+        data["distance"] = float(result["distance"])
+        duration = result.get("duration_sec")
+        data["duration_sec"] = int(duration) if duration is not None else None
 
         top3_hospitals.append(RoutingCandidateHospital(**data))
 
@@ -1978,6 +1983,16 @@ async def predict_audio(
                 "stt_text": exc.stt_text,
             },
         ) from exc
+    except SBARParseError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "ok": False,
+                "error": str(exc),
+                "reason": exc.reason,
+                "attempts": exc.attempts,
+            },
+        ) from exc
     return _build_stage1_response(stage1_result)
 
     # 2. 데이터 변환
@@ -2021,7 +2036,28 @@ async def predict_text(req: TextKTASRequest = Body(...)):
     음성 파이프라인과 동일한 decide_ktas_1to3 로직을 사용.
     """
     print("\n[Stage 1] 텍스트 분석 및 KTAS 분류 중...")
-    stage1_result = ktas_from_text(req.text, ktas_method=req.ktas_method)
+    try:
+        stage1_result = ktas_from_text(req.text, ktas_method=req.ktas_method)
+    except InvalidSTTAudioError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "error": str(exc),
+                "reason": exc.reason,
+                "stt_text": exc.stt_text,
+            },
+        ) from exc
+    except SBARParseError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "ok": False,
+                "error": str(exc),
+                "reason": exc.reason,
+                "attempts": exc.attempts,
+            },
+        ) from exc
     return _build_stage1_response(stage1_result)
 
     payload_dict = build_stage2_payload(stage1_result)
