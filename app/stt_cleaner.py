@@ -12,7 +12,7 @@ from difflib import SequenceMatcher, get_close_matches
 from openai import OpenAI
 from dotenv import load_dotenv
 from app.ktas_engine import run_ktas_engine
-from app.ktas_rag import KtasVectorStore
+from app.ktas_rag import KtasVectorStore, LIGHT_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ if not OPENAI_API_KEY:
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 RAG_VECTOR_STORE: Optional[KtasVectorStore] = None
-RAG_INDEX_PATH = Path(__file__).resolve().parent.parent / "data" / "ktas_guideline_index.json"
+RAG_INDEX_PATH = Path(__file__).resolve().parent.parent / "data" / "ktas_detail_index_joined.json"
 if RAG_INDEX_PATH.exists():
     try:
         RAG_VECTOR_STORE = KtasVectorStore.load(RAG_INDEX_PATH)
@@ -226,31 +226,7 @@ STATIC_MAP = {
 }
 
 
-def llm_clean_text(raw_text: str) -> str:
-    prompt = f"""
-
-
-[입력 STT 원문]
-{raw_text}
-
-"""
-
-    try:
-        response = get_openai_client().chat.completions.create(
-            model="gpt-5.5",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """
-        당신은 119 구급대원의 응급실 전화보고 문장을 자연스럽고 정확하게 보정하는 LLM입니다.
-
-        [목표]
-        - STT 원문의 의미를 유지하며 한국어 문장만 자연스럽게 정리합니다.
-        - 숫자(나이·혈압·맥박·호흡수·SpO₂·체온 등)는 변경하지 않습니다.
-        - 병원명은 반드시 제공된 병원리스트 중 하나로 보정합니다.
-        - 존재하지 않는 병원명을 생성하지 않습니다.
-        - “평소 다니던/외래/팔로업” 언급 시 병원 보정 규칙을 적용합니다.
-
+_HOSPITAL_NORM_BLOCK = """
         [병원명 보정 규칙]
         STT원문에 기재된 병원명이 정식 병원명 리스트에 있다면 STT원문에 기재된 병원명 그대로 놔둡니다.
         다음 단축/비표준 명칭은 → 오른쪽의 정식 병원명으로 변경합니다.
@@ -276,57 +252,91 @@ def llm_clean_text(raw_text: str) -> str:
         서남병원/서남 → 서울특별시서남병원
 
         [정식 병원명 리스트]
-        (이 리스트는 원문 그대로 유지)  
-        연세대학교의과대학강남세브란스병원  
-        삼성서울병원  
-        강동경희대학교의대병원  
-        성심의료재단강동성심병원  
-        한국보훈복지의료공단중앙보훈병원  
-        이화여자대학교의과대학부속서울병원  
-        부민병원  
-        의료법인서울효천의료재단에이치플러스양지병원  
-        건국대학교병원  
-        혜민병원  
-        고려대학교의과대학부속구로병원  
-        구로성심병원  
-        희명병원  
-        인제대학교상계백병원  
-        노원을지대학교병원  
-        한국원자력의학원원자력병원  
-        의료법인한전의료재단한일병원  
-        경희대학교병원  
-        삼육서울병원  
-        서울특별시동부병원  
-        서울성심병원  
-        서울특별시보라매병원  
-        중앙대학교병원  
-        연세대학교의과대학세브란스병원  
-        의료법인동신의료재단동신병원  
-        학교법인가톨릭학원가톨릭대학교서울성모병원  
-        한양대학교병원  
-        학교법인고려중앙학원고려대학교의과대학부속병원(안암병원)  
-        재단법인아산사회복지재단서울아산병원  
-        경찰병원  
-        이화여자대학교의과대학부속목동병원  
-        홍익병원  
-        서울특별시서남병원  
-        가톨릭대학교여의도성모병원  
-        한림대학교강남성심병원  
-        성애의료재단성애병원  
-        명지성모병원  
-        대림성모병원  
-        순천향대학교부속서울병원  
-        가톨릭대학교은평성모병원  
-        의료법인청구성심병원  
-        서울대학교병원  
-        강북삼성병원  
-        서울적십자병원  
-        세란병원  
-        국립중앙의료원  
-        서울특별시서울의료원  
-        의료법인풍산의료재단동부제일병원  
-        녹색병원  
+        (이 리스트는 원문 그대로 유지)
+        연세대학교의과대학강남세브란스병원
+        삼성서울병원
+        강동경희대학교의대병원
+        성심의료재단강동성심병원
+        한국보훈복지의료공단중앙보훈병원
+        이화여자대학교의과대학부속서울병원
+        부민병원
+        의료법인서울효천의료재단에이치플러스양지병원
+        건국대학교병원
+        혜민병원
+        고려대학교의과대학부속구로병원
+        구로성심병원
+        희명병원
+        인제대학교상계백병원
+        노원을지대학교병원
+        한국원자력의학원원자력병원
+        의료법인한전의료재단한일병원
+        경희대학교병원
+        삼육서울병원
+        서울특별시동부병원
+        서울성심병원
+        서울특별시보라매병원
+        중앙대학교병원
+        연세대학교의과대학세브란스병원
+        의료법인동신의료재단동신병원
+        학교법인가톨릭학원가톨릭대학교서울성모병원
+        한양대학교병원
+        학교법인고려중앙학원고려대학교의과대학부속병원(안암병원)
+        재단법인아산사회복지재단서울아산병원
+        경찰병원
+        이화여자대학교의과대학부속목동병원
+        홍익병원
+        서울특별시서남병원
+        가톨릭대학교여의도성모병원
+        한림대학교강남성심병원
+        성애의료재단성애병원
+        명지성모병원
+        대림성모병원
+        순천향대학교부속서울병원
+        가톨릭대학교은평성모병원
+        의료법인청구성심병원
+        서울대학교병원
+        강북삼성병원
+        서울적십자병원
+        세란병원
+        국립중앙의료원
+        서울특별시서울의료원
+        의료법인풍산의료재단동부제일병원
+        녹색병원
+"""
 
+
+def llm_clean_text(raw_text: str, include_hospital_norm: bool = True) -> str:
+    """
+    STT 원문 클리닝. include_hospital_norm=False면 병원명 보정 블록(리스트+매핑,
+    ~1,500토큰)을 프롬프트에서 제외한다. KTAS 분류/평가 경로는 병원명이 불필요하므로
+    False로 호출해 토큰을 절감한다. 프로덕션 풀 파이프라인('평소 다니던 병원' HPID
+    라우팅이 정규화된 병원명을 소비)은 기본값 True를 유지한다.
+    """
+    prompt = f"""
+
+
+[입력 STT 원문]
+{raw_text}
+
+"""
+
+    goal_hospital_lines = (
+        """
+        - 병원명은 반드시 제공된 병원리스트 중 하나로 보정합니다.
+        - 존재하지 않는 병원명을 생성하지 않습니다.
+        - “평소 다니던/외래/팔로업” 언급 시 병원 보정 규칙을 적용합니다."""
+        if include_hospital_norm
+        else ""
+    )
+    hospital_block = _HOSPITAL_NORM_BLOCK if include_hospital_norm else ""
+
+    system_content = f"""
+        당신은 119 구급대원의 응급실 전화보고 문장을 자연스럽고 정확하게 보정하는 LLM입니다.
+
+        [목표]
+        - STT 원문의 의미를 유지하며 한국어 문장만 자연스럽게 정리합니다.
+        - 숫자(나이·혈압·맥박·호흡수·SpO₂·체온 등)는 변경하지 않습니다.{goal_hospital_lines}
+{hospital_block}
         [음성 인식 오류 보정]
         - STT 결과에서 응급의료 문맥상 어색한 단어는 발음과 문맥을 함께 고려해 자연스럽게 보정한다.
         - 단, 원문에 없는 새로운 의학 정보는 추가하지 않는다.
@@ -342,6 +352,14 @@ def llm_clean_text(raw_text: str) -> str:
         - 교정된 응급전화 보고 문장만 출력한다.
         - 설명, 근거, 목록은 출력하지 않는다.
         """
+
+    try:
+        response = get_openai_client().chat.completions.create(
+            model=LIGHT_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_content,
                 },
 
                 {
@@ -352,7 +370,7 @@ def llm_clean_text(raw_text: str) -> str:
 
             #temperature=0.1,
         )
-        
+
         return response.choices[0].message.content.strip()
 
     except Exception as e:

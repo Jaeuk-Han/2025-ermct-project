@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -27,7 +29,124 @@ def get_openai_client() -> OpenAI:
     return _cached_client
 
 GPT_MODEL = "gpt-5.5"
+# 저가 모델: 클리닝/SBAR추출/중분류선택 등 "쉬운" 작업용. RAG 추론(GPT_MODEL)만 최고가 유지.
+# gpt-5.5-mini가 이 키에서 안 되면 .env에 ERMCT_LIGHT_MODEL=<정확한 모델명> 지정.
+LIGHT_MODEL = os.getenv("ERMCT_LIGHT_MODEL", "gpt-5.5-mini")
 EMBEDDING_MODEL = "text-embedding-3-large"
+
+
+# =====================================================
+# KTAS 대분류(신체계통) taxonomy — RAG 가지(branch) 필터용
+# =====================================================
+# LLM이 SBAR에서 뱉은 ktas_categories 값을 아래 정식 CSV category 문자열로 정규화한다.
+# '첫인상 평가'는 LLM이 고르는 대상이 아니라, 필터 시 항상 포함되는 중증 안전 가지다.
+
+KTAS_CATEGORIES = [
+    "소화기계", "임신/여성생식계", "피부", "비뇨기계/남성생식계", "근골격계", "일반",
+    "신경계", "심혈관계", "입,목/얼굴", "몸통외상", "호흡기계", "환경손상",
+    "코", "물질오용", "눈", "정신건강", "귀",
+]
+FIRST_IMPRESSION_CATEGORY = "첫인상 평가(명백한 중증)"
+
+
+def _normalize_category_key(value: str) -> str:
+    # 구두점/공백 차이를 무시하고 매칭 (예: "입/목/얼굴" ~ "입,목/얼굴")
+    return re.sub(r"[\s,/()·]", "", value or "")
+
+
+_CATEGORY_LOOKUP = {_normalize_category_key(c): c for c in KTAS_CATEGORIES}
+
+
+def canonicalize_categories(raw: Any) -> List[str]:
+    """LLM이 뱉은 대분류 값을 정식 CSV category 문자열로 정규화. 목록 밖 값은 버린다."""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    result: List[str] = []
+    for item in raw:
+        canonical = _CATEGORY_LOOKUP.get(_normalize_category_key(str(item)))
+        if canonical and canonical not in result:
+            result.append(canonical)
+    return result
+
+
+# chief_complaint(enum) → 한국어 임상어 (RAG 쿼리를 코퍼스 어휘에 맞추기 위함)
+_CC_KO = {
+    "chest_pain": "흉통", "dyspnea": "호흡곤란", "neuro": "신경학적 증상",
+    "abdominal": "복통", "bleeding": "출혈", "altered": "의식 변화",
+    "trauma": "외상", "obgyn": "산과 응급", "pediatric": "소아 응급",
+    "psychiatric": "정신과적 증상",
+}
+_SEV_KO = {"severe": "중증", "moderate": "중등도", "mild": "경증"}
+
+
+def build_rag_query(clean_text: str, sbar: dict) -> str:
+    """
+    RAG 검색용 쿼리를 코퍼스 어휘(한국어 증상 + 중증도)에 맞춰 구성한다.
+    SBAR JSON을 통째로 넣지 않는다 — 영어 필드명/null/false가 임베딩 노이즈가 되기 때문.
+    """
+    S = sbar.get("S") or {}
+    parts: List[str] = []
+
+    # 증상어를 맨 앞에(검색 앵커) — symptom_text 우선, 없으면 enum→한국어.
+    # cc=None(enum 밖)이어도 symptom_text로 앵커를 확보해 보일러플레이트 오염을 줄인다.
+    sev = _SEV_KO.get(str(S.get("severity") or "").strip().lower())
+    symptom = (S.get("symptom_text") or "").strip()
+    if not symptom:
+        symptom = _CC_KO.get(str(S.get("chief_complaint") or "").strip().lower(), "")
+    if symptom:
+        parts.append(f"{sev} {symptom}" if sev else symptom)  # 예: "중등도 호흡곤란"
+
+    if clean_text and clean_text.strip():
+        parts.append(clean_text.strip())
+
+    return "\n".join(parts) if parts else (clean_text or "")
+
+
+def classify_subcategory(
+    symptom_text: Optional[str],
+    categories: List[str],
+    cat2sub: Dict[str, List[str]],
+    max_pick: int = 2,
+) -> List[str]:
+    """
+    2차 LLM 호출: 이미 정해진 대분류(들)의 중분류 목록만 보여주고, 증상어에 맞는 것을 고른다.
+    실패/애매하면 빈 리스트 → 호출부에서 대분류-only 필터로 폴백.
+    """
+    if not symptom_text or not categories:
+        return []
+    options = sorted({s for c in categories for s in cat2sub.get(c, [])})
+    if not options:
+        return []
+
+    prompt = (
+        f"환자 증상: {symptom_text}\n"
+        f"아래 중분류 목록에서 이 증상에 가장 맞는 것을 최대 {max_pick}개 고르시오.\n"
+        f"정말 애매하면 빈 배열 []. 목록의 문자열을 토씨 그대로 사용. JSON 배열만 반환.\n"
+        f"목록: {options}"
+    )
+    try:
+        resp = get_openai_client().chat.completions.create(
+            model=LIGHT_MODEL,
+            messages=[
+                {"role": "system", "content": "너는 KTAS 중분류 선택기다. JSON 문자열 배열만 반환한다."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        raw = resp.choices[0].message.content or "[]"
+        m = re.search(r"\[.*\]", raw, re.S)
+        picked = json.loads(m.group(0)) if m else []
+    except Exception:
+        return []  # 2차 호출 실패 시 조용히 대분류-only로 폴백
+
+    opt_lookup = {_normalize_category_key(o): o for o in options}
+    result: List[str] = []
+    for p in picked:
+        canonical = opt_lookup.get(_normalize_category_key(str(p)))
+        if canonical and canonical not in result:
+            result.append(canonical)
+    return result[:max_pick]
 
 
 class RagResponseParseError(ValueError):
@@ -100,10 +219,27 @@ class KtasGuidelineDoc:
         )
 
 
+def build_cat2sub(docs: List["KtasGuidelineDoc"]) -> Dict[str, List[str]]:
+    """인덱스에서 대분류→중분류 목록 매핑을 생성 (2차 LLM 호출에 넘길 후보)."""
+    from collections import defaultdict
+
+    m: Dict[str, set] = defaultdict(set)
+    for d in docs:
+        cat, sub = getattr(d, "category", None), getattr(d, "sub_category", None)
+        if cat and sub and cat not in KTAS_CATEGORIES_EXCLUDE:
+            m[cat].add(sub)
+    return {c: sorted(v) for c, v in m.items()}
+
+
+# 대분류 자리에 잘못 들어온 헤더 잔여값(빌드 스크립트가 헤더 1줄만 스킵해서 생김)
+KTAS_CATEGORIES_EXCLUDE = {"3단계"}
+
+
 class KtasVectorStore:
     def __init__(self, docs: Optional[List[KtasGuidelineDoc]] = None) -> None:
         self.docs = docs or []
         self.embedding_model = EMBEDDING_MODEL
+        self.cat2sub = build_cat2sub(self.docs)
 
     @classmethod
     def load(cls, path: Path) -> "KtasVectorStore":
@@ -143,15 +279,34 @@ class KtasVectorStore:
             return 0.0
         return dot / (norm_a * norm_b)
 
-    def query(self, text: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def query(
+        self,
+        text: str,
+        top_k: int = 5,
+        categories: Optional[List[str]] = None,
+        sub_categories: Optional[List[str]] = None,
+        include_first_impression: bool = True,
+    ) -> List[Dict[str, Any]]:
         query_embedding = self.encode_text(text)
         if not query_embedding:
             return []
+
+        # 계층 필터: 대분류(+ 지정 시 중분류)로 후보를 좁힘 + 첫인상평가는 항상 포함.
+        # categories가 비면 전체 검색. sub_categories가 비면 대분류까지만 좁힘.
+        category_set = set(categories) if categories else None
+        sub_set = set(sub_categories) if sub_categories else None
 
         hits: list[Dict[str, Any]] = []
         for doc in self.docs:
             if not doc.embedding:
                 continue
+            if category_set is not None:
+                in_branch = doc.category in category_set
+                if in_branch and sub_set is not None:
+                    in_branch = doc.sub_category in sub_set
+                is_critical = include_first_impression and doc.first_impression
+                if not (in_branch or is_critical):
+                    continue
             score = self.cosine_similarity(query_embedding, doc.embedding)
             hits.append({"doc": doc, "score": score})
 
@@ -189,6 +344,13 @@ def build_rag_prompt(clean_text: str, sbar: dict, retrieved_docs: List[Dict[str,
         "정보가 부족하면 값을 만들어내지 말고 null 또는 unknown을 사용하십시오.",
         "제공된 검색 evidence만 사용하십시오.",
         "evidence가 부족하면 confidence를 0.5 이하로 설정하고 warning을 추가하십시오.",
+        # ↓ 숫자 티어 매핑: 검색 문서에 적힌 수치 기준을 환자 실제 값에 정확히 대입한다.
+        "검색된 문서에 수치 기준(예: NRS 4-7, GCS 9-13, SpO2 85%, 수축기혈압 90 미만, 급성 통증(8-10))이 있으면, 환자의 실제 수치를 그 범위에 대입해 일치하는 문서의 KTAS를 고르십시오.",
+        "경계값은 문서에 표기된 범위 그대로 포함해 판단하십시오. 예: NRS가 4이면 '(<4)'가 아니라 '(4-7)' 구간에 속합니다.",
+        "환자 수치를 근거 없이 더 위급하거나 덜 위급한 구간으로 옮기지 말고, 수치가 실제로 속하는 구간의 문서를 따르십시오.",
+        # ↓ 조건 수식어 가드: 환자에 해당하지 않는 수식어가 붙은 문서의 KTAS를 그대로 적용하지 않는다.
+        "문서에 붙은 조건 수식어(예: 만성/chronic, 급성/acute, 면역저하, 열 동반 등)가 환자 상태와 다르면 그 문서의 KTAS를 적용하지 마십시오.",
+        "특히 환자가 급성 증상인데 '정상 활력징후' 문서가 '만성' 조건뿐이라면, 그 만성 문서의 낮은 KTAS(예: 5)를 급성 환자에 적용하지 말고 급성 기본값(중등도, 통상 KTAS 3)으로 판단하십시오.",
         "설명은 한국어로 작성하십시오."
     ]
 
@@ -271,7 +433,30 @@ def classify_ktas_rag(
     top_k: int = 5,
     candidate_count: int = 3,
 ) -> List[Dict[str, Any]]:
-    retrieved = vector_store.query(clean_text + "\n" + json.dumps(sbar, ensure_ascii=False), top_k=top_k)
+    S = sbar.get("S") or {}
+    categories = canonicalize_categories(S.get("ktas_categories"))
+    # 2차 LLM: 대분류가 정해졌으면 그 안 중분류를 증상어로 좁힘 (실패/애매하면 [])
+    subcategories = (
+        classify_subcategory(S.get("symptom_text"), categories, vector_store.cat2sub)
+        if categories
+        else []
+    )
+    query_text = build_rag_query(clean_text, sbar)
+
+    # 계층 폴백 체인: 대분류∩중분류 → 대분류만 → 전체.
+    # 중분류로 좁히면 leaf가 적으니(≤~20) top_k를 키워 모든 중증도 티어를 재추론에 통째로 넘김.
+    leaf_k = max(top_k, 20) if categories else top_k
+    retrieved = vector_store.query(
+        query_text,
+        top_k=leaf_k,
+        categories=categories or None,
+        sub_categories=subcategories or None,
+    )
+    if not retrieved and subcategories:  # 중분류 필터가 너무 빡세면 중분류만 풀기
+        retrieved = vector_store.query(query_text, top_k=leaf_k, categories=categories or None)
+    if not retrieved and categories:  # 대분류까지 풀기
+        retrieved = vector_store.query(query_text, top_k=top_k, categories=None)
+
     if not retrieved:
         raise RuntimeError("RAG vector store에서 검색된 문서가 없습니다.")
 

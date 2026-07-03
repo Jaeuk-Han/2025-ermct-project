@@ -11,7 +11,7 @@ from app.ktas_normalizer import (
     normalize_rag_based_result,
     normalize_rule_based_result,
 )
-from app.ktas_rag import KtasVectorStore, RagResponseParseError, classify_ktas_rag
+from app.ktas_rag import KtasVectorStore, RagResponseParseError, classify_ktas_rag, LIGHT_MODEL
 from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,8 @@ DEFAULT_SBAR = {
         "gender": None,
         "chief_complaint_group": None,
         "chief_complaint": None,
+        "symptom_text": None,
+        "ktas_categories": [],
         "modifiers": [],
         "severity": None,
         "red_flags": [],
@@ -106,7 +108,7 @@ def call_llm2_for_sbar(clean_text: str) -> str:
 
     
     response = get_openai_client().chat.completions.create(
-        model="gpt-5.5",
+        model=LIGHT_MODEL,
         messages=[
             {
                 "role": "system",
@@ -125,7 +127,6 @@ def call_llm2_for_sbar(clean_text: str) -> str:
     규칙:
     - 정보가 없으면 null 또는 false로 둔다.
     - 활력징후 수치는 숫자로 넣는다.
-    - 의식수준(AVPU)은 mental_status 필드에 alert / voice / pain / unresponsive 중 하나로 넣는다.
     - chief_complaint_group은 반드시 아래 중 하나만 사용합니다.
         Neurologic
         Respiratory
@@ -139,9 +140,8 @@ def call_llm2_for_sbar(clean_text: str) -> str:
         Eye_ENT
         Metabolic
         Bleeding
-    - 심각도는 아래중 하나로 매핑합니다.
+    - 심각도(severity)는 아래중 하나로 매핑합니다.
         mild | moderate | severe | unknown
-    - chief_complaint_group은 대분류를 넣는다.
     - chief_complaint는 반드시 아래 allowed_chief_complaints 중 하나만 넣는다.
         chest_pain
         dyspnea
@@ -158,9 +158,21 @@ def call_llm2_for_sbar(clean_text: str) -> str:
       예: flank pain, renal colic, kidney stone, 옆구리 통증은 abdominal로 매핑한다.
       예: acute focal weakness, stroke_like, 한쪽 마비는 neuro로 매핑한다.
       예: 호흡곤란, 숨을 못 쉼은 dyspnea로 매핑한다.
+    - symptom_text에는 환자의 주호소를 한국어 자연어로 간결히 적는다(enum 제약 없음).
+      예: "전신 가려움", "숨이 참", "명치 통증", "발목 삠". chief_complaint가 null이어도 반드시 채운다.
+      활력징후·의식·나이 같은 부수 정보는 넣지 말고 '증상' 자체만 적는다.
+    - ktas_categories에는 이 환자가 속하는 KTAS 신체계통 대분류를 아래 목록에서만 고른다.
+        소화기계, 임신/여성생식계, 피부, 비뇨기계/남성생식계, 근골격계, 일반,
+        신경계, 심혈관계, 입,목/얼굴, 몸통외상, 호흡기계, 환경손상,
+        코, 물질오용, 눈, 정신건강, 귀
+      - 위 목록의 한국어 문자열을 그대로 사용하고, 목록에 없는 값은 만들지 않는다.
+      - 가장 적합한 1개를 배열에 넣되, 두 계통이 모두 뚜렷하면 최대 2개까지 넣는다.
+        예: 숨참 + 흉통 → ["호흡기계", "심혈관계"]
+      - 특정 계통으로 좁힐 수 없거나 애매하면 빈 배열 []로 둔다.
+      - "첫인상 평가"는 여기 넣지 않는다 — 중증 신호는 시스템이 자동으로 포함한다.
+      - ktas_categories는 검색용이며, chief_complaint/chief_complaint_group과 별개로 채운다.
     - modifiers에는 KTAS 판단에 영향을 줄 수 있는 표현을 넣는다.
     예: severe dyspnea, moderate dyspnea, SpO2 85%, sudden onset, LOC positive, crushing pain, tearing pain
-    - 활력징후는 숫자만 넣는다.
     - 의식수준은 mental_status 필드에 아래 풀워드 중 하나로만 넣는다.
         A → "alert"
         V → "voice"
@@ -525,6 +537,57 @@ def classify_ktas(sbar: dict) -> dict:
 # 6. 전체 KTAS 엔진
 # =====================================================
 
+def red_flag_ceiling(sbar: dict) -> int:
+    """
+    객관적 위독 신호에 따른 KTAS 상한(숫자가 작을수록 위급).
+    RAG 예측이 이 상한보다 '덜 위급'하면 이 상한으로 강제 상향된다.
+    레드플래그가 없으면 5(제약 없음)를 반환해 RAG가 전 범위(1~5)를 결정하게 한다.
+    """
+    A = sbar.get("A") or {}
+    R = sbar.get("R") or {}
+    S = sbar.get("S") or {}
+
+    def num(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    mental = str(A.get("mental_status") or "").lower()
+    gcs, sbp, spo2, hr, rr = (num(A.get(k)) for k in ("gcs", "sbp", "spo2", "hr", "rr"))
+    flag_text = " ".join(
+        str(x) for x in ((S.get("red_flags") or []) + (S.get("modifiers") or []))
+    ).lower()
+
+    # KTAS 1 상한: 즉각적 소생/생명 위협
+    if R.get("cpr") or R.get("aed"):
+        return 1
+    if any(k in flag_text for k in ("arrest", "cardiac arrest", "shock", "respiratory failure")):
+        return 1
+    if mental in ("coma", "unresponsive"):
+        return 1
+    if gcs is not None and gcs <= 8:
+        return 1
+    if sbp is not None and sbp <= 80:
+        return 1
+    if spo2 is not None and spo2 < 85:
+        return 1
+
+    # KTAS 2 상한: 명백한 중증(즉각적이진 않음)
+    if mental in ("drowsy", "stupor", "voice", "pain"):
+        return 2
+    if gcs is not None and 9 <= gcs <= 13:
+        return 2
+    if spo2 is not None and spo2 < 90:
+        return 2
+    if sbp is not None and sbp <= 90 and hr is not None and hr >= 120:
+        return 2
+    if rr is not None and rr >= 30:
+        return 2
+
+    return 5  # 제약 없음 → RAG가 전 범위 결정
+
+
 def run_ktas_engine(
     clean_text: str,
     raw_hospital=None,
@@ -559,29 +622,31 @@ def run_ktas_engine(
             )
             rag_level = normalized.ktas_level
             rag_confidence = normalized.confidence
-            safety_reason: str | None = None
 
-            if rag_confidence is None or rag_confidence < 0.6:
-                final_level = rule_level
-                safety_reason = "rag_confidence_low"
-            elif not normalized.evidence:
-                final_level = rule_level
-                safety_reason = "rag_evidence_empty"
-            else:
-                final_level = min(rule_level, rag_level)
-                if final_level < rag_level:
-                    safety_reason = "rag_less_urgent_than_rule"
+            # RAG가 KTAS 1~5 전 범위를 주도한다.
+            # 단, 객관적 위독 신호(레드플래그)보다 덜 위급하게 본 경우에만 상한으로 강제 상향.
+            # (기존 min(rule, rag) 전면 clamp는 rule이 1~3만 내서 경증을 3에 가둠 → 제거)
+            ceiling = red_flag_ceiling(sbar)
+            final_level = min(rag_level, ceiling)
+            guard_applied = final_level != rag_level
 
-            normalized = normalized.model_copy(
-                update={
-                    "ktas_level": final_level,
-                    "rule_based_ktas": rule_level,
-                    "rag_based_ktas": rag_level,
-                    "rag_confidence": rag_confidence,
-                    "safety_merge_applied": final_level != rag_level,
-                    "fallback_reason": safety_reason,
-                }
-            )
+            update = {
+                "ktas_level": final_level,
+                "rule_based_ktas": rule_level,
+                "rag_based_ktas": rag_level,
+                "rag_confidence": rag_confidence,
+                "red_flag_ceiling": ceiling,
+                "safety_merge_applied": guard_applied,
+                "fallback_reason": "red_flag_guard" if guard_applied else None,
+            }
+            if guard_applied:
+                # ktas만 바꾸고 reason/confidence를 방치하면 서로 모순되므로 함께 보정
+                update["reason"] = (
+                    f"레드플래그 안전가드: 객관적 위독 신호로 KTAS {final_level}로 상향 "
+                    f"(RAG 추정 {rag_level})"
+                )
+                update["confidence"] = 1.0
+            normalized = normalized.model_copy(update=update)
             logger.info(
                 "[KTAS] rag_based classifier succeeded ktas=%s confidence=%s options=%s",
                 normalized.ktas_level,
