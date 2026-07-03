@@ -55,6 +55,9 @@ build/
 .claude/
 .cursor/
 
+# Local Git worktrees
+/.worktrees/
+
 # RAG 인덱스/평가 데이터 (대용량·환자데이터·실험출력 — 로컬 전용)
 /data/ktas_detail_index_joined.json
 /data/ktas_detail_embedding_index.json

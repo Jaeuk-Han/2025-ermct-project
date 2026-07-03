@@ -1,0 +1,28 @@
+{
+  "O:F": {
+    "canonical_terms": [
+      "저체온증",
+      "hypothermia"
+    ],
+    "aliases": [
+      "저체온",
+      "몸이 차갑다",
+      "체온이 낮다",
+      "추위에 오래 노출",
+      "hypothermia"
+    ]
+  },
+  "P:B": {
+    "canonical_terms": [
+      "쏘임",
+      "sting"
+    ],
+    "aliases": [
+      "쏘였다",
+      "벌에 쏘임",
+      "곤충에 쏘임",
+      "bee sting",
+      "insect sting"
+    ]
+  }
+}
